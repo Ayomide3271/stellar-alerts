@@ -4,7 +4,8 @@
   "description": "Stellar Payment Tracker",
   "private": true,
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace=api",
