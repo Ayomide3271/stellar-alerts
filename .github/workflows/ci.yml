@@ -38,3 +38,6 @@ jobs:
 
       - name: Build Web Application
         run: npm run build --workspace=web
+        env:
+          NEXTAUTH_SECRET: "ci-build-dummy-secret-key-12345"
+          NEXT_PUBLIC_API_URL: "http://localhost:3001"

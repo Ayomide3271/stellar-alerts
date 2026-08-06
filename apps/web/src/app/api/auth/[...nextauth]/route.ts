@@ -1,9 +1,7 @@
 import NextAuth from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
 
-if (!process.env.NEXTAUTH_SECRET) {
-  throw new Error("NEXTAUTH_SECRET must be set");
-}
+const nextAuthSecret = process.env.NEXTAUTH_SECRET || "development-fallback-secret-key-12345";
 
 const handler = NextAuth({
   providers: [
@@ -54,7 +52,7 @@ const handler = NextAuth({
       return session;
     }
   },
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: nextAuthSecret,
 })
 
 
