@@ -10,7 +10,7 @@
   "scripts": {
     "build": "turbo build",
     "typecheck": "turbo typecheck",
-    "dev": "turbo dev",
+    "dev": "turbo run dev dev:supervisor",
     "dev:api": "npm run dev --workspace=api",
     "dev:worker": "npm run dev:worker --workspace=api",
     "dev:indexer": "npm run dev:indexer --workspace=api",
