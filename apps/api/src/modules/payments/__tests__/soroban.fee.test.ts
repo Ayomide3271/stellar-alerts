@@ -18,6 +18,7 @@ vi.mock('stellar-sdk', async (importOriginal) => {
 import {
   stroopsToXlm,
   parseLedgerFootprint,
+  buildRentBreakdown,
   simulateTransaction,
   sorobanServer,
   SorobanFeeEstimate,
@@ -277,5 +278,33 @@ describe('simulateTransaction', () => {
     const result = await simulateTransaction('FAKE_XDR==');
     // inclusion 100 + resource 10_000_000 = 10_000_100 stroops = 1.0000100 XLM
     expect(result.totalFeeXlm).toBe('1.0000100');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildRentBreakdown – persistent vs temporary apportioning
+// ---------------------------------------------------------------------------
+describe('buildRentBreakdown', () => {
+  const persistent = { key: 'p', durability: 'persistent' as const };
+  const temporary = { key: 't', durability: 'temporary' as const };
+
+  it('attributes all rent to persistent storage when there are no writes', () => {
+    const b = buildRentBreakdown(BigInt(1000), []);
+    expect(b.persistentStroops).toBe('1000');
+    expect(b.temporaryStroops).toBe('0');
+  });
+
+  it('weights persistent entries at twice the temporary rate', () => {
+    const b = buildRentBreakdown(BigInt(900), [persistent, temporary]);
+    expect(b.persistentEntries).toBe(1);
+    expect(b.temporaryEntries).toBe(1);
+    expect(b.temporaryStroops).toBe('300');
+    expect(b.persistentStroops).toBe('600');
+  });
+
+  it('always sums to the total rent fee and reports XLM', () => {
+    const b = buildRentBreakdown(BigInt(10_000_001), [persistent, persistent, temporary]);
+    expect(BigInt(b.persistentStroops) + BigInt(b.temporaryStroops)).toBe(BigInt(10_000_001));
+    expect(b.persistentXlm).toMatch(/^\d+\.\d{7}$/);
   });
 });

@@ -1,11 +1,21 @@
-import * as StellarSdk from 'stellar-sdk';
-import { getJson, setJson, getSacMetadataCacheKey, SAC_METADATA_TTL } from './cache';
-import { formatTokenAmount } from './stellar';
-import { env } from '../config/env';
+import * as StellarSdk from "stellar-sdk";
+import { prisma } from "./prisma";
+import {
+  hashMerkleLeaf,
+  verifyMerkleProof,
+  MerkleProofStep,
+} from "../utils/merkle-verifier";
+import { decodeScAddress, decodeScAmount, formatTokenAmount } from "./stellar";
+import { stellarNetwork } from "../config/network";
+import { sorobanStateService } from "../modules/soroban-state/soroban-state.service";
+import { env } from "../config/env";
+import { getJson, setJson, getSacMetadataCacheKey, SAC_METADATA_TTL } from "./cache";
+import { withDeadline } from "./external-request";
+import type { EnrichedSorobanEvent, SorobanRpcEvent } from "../types/soroban-event";
 
-const SOROBAN_RPC_URL = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
-const STELLAR_NETWORK_PASSPHRASE =
-  process.env.STELLAR_NETWORK_PASSPHRASE || StellarSdk.Networks.TESTNET;
+export const SOROBAN_RPC_URL = stellarNetwork.sorobanRpcUrl;
+const LEDGER_BATCH_SIZE = 100;
+const MAX_ACTIVE_CONTRACTS = 100;
 
 export const sorobanServer = new (StellarSdk as any).rpc.Server(
   SOROBAN_RPC_URL,
@@ -160,11 +170,387 @@ export function getContractSubscriberCount(contractId: string): number {
   return total;
 }
 
-export interface SacMetadata {
-  contractId: string;
-  name: string;
-  symbol: string;
-  decimals: number;
+// ---------------------------------------------------------------------------
+// Fee-estimation types
+// ---------------------------------------------------------------------------
+
+/**
+ * Footprint entry describing a single ledger key that will be read or written
+ * by the simulated transaction.
+ */
+export interface LedgerFootprintEntry {
+  /** Hex-encoded ledger key XDR */
+  key: string;
+  /** Durability of the storage entry */
+  durability: 'persistent' | 'temporary';
+}
+
+/**
+ * Rent fee split by storage durability. Persistent entries are archived rather
+ * than deleted and are charged at a higher rate than temporary entries.
+ */
+export interface SorobanRentBreakdown {
+  persistentStroops: string;
+  persistentXlm: string;
+  persistentEntries: number;
+  temporaryStroops: string;
+  temporaryXlm: string;
+  temporaryEntries: number;
+}
+
+/**
+ * Detailed fee breakdown returned by {@link simulateTransaction}.
+ *
+ * All fee values are expressed in *stroops* (1 XLM = 10,000,000 stroops) as
+ * strings so they can be used directly with Stellar SDK big-number helpers.
+ */
+export interface SorobanFeeEstimate {
+  /** Total inclusion fee (base network fee) in stroops */
+  inclusionFeeStroops: string;
+  /** Total resource fee (execution + state rent) in stroops */
+  resourceFeeStroops: string;
+  /** Rent fee for all ledger entries in stroops */
+  rentFeeStroops: string;
+  /** Total of all fees in stroops */
+  totalFeeStroops: string;
+  /** Human-readable total fee in XLM */
+  totalFeeXlm: string;
+  /** Inclusion fee in XLM */
+  inclusionFeeXlm: string;
+  /** Resource fee (execution + state rent) in XLM */
+  resourceFeeXlm: string;
+  /** Rent fee in XLM */
+  rentFeeXlm: string;
+  /** Rent fee split between persistent and temporary storage footprints */
+  rentBreakdown: SorobanRentBreakdown;
+  /** Whether archived entries must be restored before this transaction can run */
+  restoreRequired: boolean;
+  /** Fee of the separate restore transaction in stroops ('0' when not required) */
+  restoreFeeStroops: string;
+  /** Fee of the separate restore transaction in XLM */
+  restoreFeeXlm: string;
+  /** Ledger entries that will be *read* during execution */
+  readFootprint: LedgerFootprintEntry[];
+  /** Ledger entries that will be *written* during execution */
+  writeFootprint: LedgerFootprintEntry[];
+  /** Number of read-only ledger entries */
+  readCount: number;
+  /** Number of read-write ledger entries */
+  writeCount: number;
+  /** Estimated CPU instructions */
+  cpuInstructions: number;
+  /** Estimated memory bytes */
+  memoryBytes: number;
+  /** Whether the simulation succeeded */
+  success: boolean;
+  /** Error description when success is false */
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Stroops per XLM */
+const STROOPS_PER_XLM = 10_000_000;
+
+/**
+ * Converts a stroops string or number to XLM with 7 decimal places.
+ */
+export function stroopsToXlm(stroops: string | number): string {
+  const n = typeof stroops === 'string' ? BigInt(stroops) : BigInt(Math.round(Number(stroops)));
+  const xlmWhole = n / BigInt(STROOPS_PER_XLM);
+  const xlmFrac = n % BigInt(STROOPS_PER_XLM);
+  return `${xlmWhole}.${xlmFrac.toString().padStart(7, '0')}`;
+}
+
+/**
+ * Parses the `sorobanData` XDR field inside a SimulateTransactionResponse and
+ * extracts read/write footprint entries.  Falls back gracefully when the field
+ * is absent (e.g., non-Soroban transactions or unit-test mocks).
+ */
+export function parseLedgerFootprint(simulationResult: any): {
+  readFootprint: LedgerFootprintEntry[];
+  writeFootprint: LedgerFootprintEntry[];
+} {
+  const readFootprint: LedgerFootprintEntry[] = [];
+  const writeFootprint: LedgerFootprintEntry[] = [];
+
+  try {
+    // The stellar-sdk v13 SimulateTransactionResponse exposes a `result` with
+    // `auth` and the raw transaction envelope, but the footprint lives inside
+    // the `transactionData` / `sorobanData` field that the SDK attaches.
+    const sorobanData =
+      simulationResult?.transactionData?.value?.() ??
+      simulationResult?.transactionData ??
+      simulationResult?.result?.sorobanData ??
+      null;
+
+    if (!sorobanData) {
+      return { readFootprint, writeFootprint };
+    }
+
+    // `footprint()` returns an XDR LedgerFootprint with readOnly / readWrite arrays
+    const footprint =
+      typeof sorobanData.footprint === 'function'
+        ? sorobanData.footprint()
+        : sorobanData.footprint ?? null;
+
+    if (!footprint) {
+      return { readFootprint, writeFootprint };
+    }
+
+    const readOnly: any[] =
+      typeof footprint.readOnly === 'function'
+        ? footprint.readOnly()
+        : footprint.readOnly ?? [];
+
+    const readWrite: any[] =
+      typeof footprint.readWrite === 'function'
+        ? footprint.readWrite()
+        : footprint.readWrite ?? [];
+
+    for (const entry of readOnly) {
+      readFootprint.push({
+        key: entry.toXDR?.('hex') ?? String(entry),
+        durability: _detectDurability(entry),
+      });
+    }
+
+    for (const entry of readWrite) {
+      writeFootprint.push({
+        key: entry.toXDR?.('hex') ?? String(entry),
+        durability: _detectDurability(entry),
+      });
+    }
+  } catch {
+    // Footprint parsing is best-effort; never throw.
+  }
+
+  return { readFootprint, writeFootprint };
+}
+
+/**
+ * Detects whether a ledger key belongs to a persistent or temporary storage
+ * entry by inspecting the XDR discriminant.
+ */
+function _detectDurability(ledgerKey: any): 'persistent' | 'temporary' {
+  try {
+    const arm: string =
+      typeof ledgerKey.switch === 'function'
+        ? ledgerKey.switch().name ?? ''
+        : '';
+    if (arm.toLowerCase().includes('temp') || arm.toLowerCase().includes('temporary')) {
+      return 'temporary';
+    }
+    if (
+      typeof ledgerKey.contractData === 'function' ||
+      typeof ledgerKey.contractCode === 'function'
+    ) {
+      const data = ledgerKey.contractData?.();
+      const durabilityArm: string =
+        typeof data?.durability === 'function' ? data.durability().name ?? '' : '';
+      if (durabilityArm.toLowerCase().includes('temp')) {
+        return 'temporary';
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 'persistent';
+}
+
+/**
+ * Relative per-ledger rent weight of each storage class. Mirrors the network
+ * rent-rate denominators (temporary entries are charged half the persistent
+ * rate), so the rent estimate is apportioned accordingly.
+ */
+const PERSISTENT_RENT_WEIGHT = BigInt(2);
+const TEMPORARY_RENT_WEIGHT = BigInt(1);
+
+/**
+ * Apportions the total rent fee over the write footprint by storage durability.
+ * Only written (created / extended) entries accrue rent; with no writes the
+ * rent is attributed to persistent storage. The two parts always sum to
+ * `rentFeeStroops`.
+ */
+export function buildRentBreakdown(
+  rentFeeStroops: bigint,
+  writeFootprint: LedgerFootprintEntry[],
+): SorobanRentBreakdown {
+  const persistentEntries = writeFootprint.filter((e) => e.durability === 'persistent').length;
+  const temporaryEntries = writeFootprint.length - persistentEntries;
+
+  const persistentShare = BigInt(persistentEntries) * PERSISTENT_RENT_WEIGHT;
+  const temporaryShare = BigInt(temporaryEntries) * TEMPORARY_RENT_WEIGHT;
+  const totalShare = persistentShare + temporaryShare;
+
+  const temporary =
+    totalShare === BigInt(0) ? BigInt(0) : (rentFeeStroops * temporaryShare) / totalShare;
+  const persistent = rentFeeStroops - temporary;
+
+  return {
+    persistentStroops: persistent.toString(),
+    persistentXlm: stroopsToXlm(persistent.toString()),
+    persistentEntries,
+    temporaryStroops: temporary.toString(),
+    temporaryXlm: stroopsToXlm(temporary.toString()),
+    temporaryEntries,
+  };
+}
+
+function failedFeeEstimate(error: string): SorobanFeeEstimate {
+  return {
+    inclusionFeeStroops: '0',
+    resourceFeeStroops: '0',
+    rentFeeStroops: '0',
+    totalFeeStroops: '0',
+    totalFeeXlm: '0.0000000',
+    inclusionFeeXlm: '0.0000000',
+    resourceFeeXlm: '0.0000000',
+    rentFeeXlm: '0.0000000',
+    rentBreakdown: buildRentBreakdown(BigInt(0), []),
+    restoreRequired: false,
+    restoreFeeStroops: '0',
+    restoreFeeXlm: '0.0000000',
+    readFootprint: [],
+    writeFootprint: [],
+    readCount: 0,
+    writeCount: 0,
+    cpuInstructions: 0,
+    memoryBytes: 0,
+    success: false,
+    error,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// simulateTransaction
+// ---------------------------------------------------------------------------
+
+/**
+ * Wraps the Soroban RPC `simulateTransaction` call and returns a structured
+ * {@link SorobanFeeEstimate} with read/write ledger entry footprints and a
+ * complete fee breakdown including storage rent.
+ *
+ * @param xdrEnvelope - Base64-encoded XDR TransactionEnvelope of the Soroban
+ *                      transaction to simulate.
+ */
+export async function simulateTransaction(xdrEnvelope: string): Promise<SorobanFeeEstimate> {
+  try {
+    // Decode the envelope and let the SDK build a Transaction object so the
+    // RPC call receives a proper Transaction instance.
+    const transaction = StellarSdk.TransactionBuilder.fromXDR(
+      xdrEnvelope,
+      (StellarSdk as any).Networks?.TESTNET ?? 'Test SDF Network ; September 2015'
+    );
+
+    const simulationResult: any = await sorobanServer.simulateTransaction(transaction);
+
+    // -----------------------------------------------------------------------
+    // Error path
+    // -----------------------------------------------------------------------
+    if (simulationResult?.error) {
+      return failedFeeEstimate(String(simulationResult.error));
+    }
+
+    // -----------------------------------------------------------------------
+    // Extract fees
+    // The SDK returns minResourceFee as a string (stroops) and the classic
+    // base fee is embedded in the transaction itself.  We also surface the
+    // rent fee component separately when available.
+    // -----------------------------------------------------------------------
+    const minResourceFee: string = String(simulationResult?.minResourceFee ?? '0');
+
+    // Inclusion (base) fee: use 100 stroops as the minimum network default
+    // when we cannot read it from the transaction directly.
+    let inclusionFeeStroops = '100';
+    try {
+      const fee = transaction.fee;
+      if (fee && Number(fee) > 0) {
+        inclusionFeeStroops = String(fee);
+      }
+    } catch {
+      // keep default
+    }
+
+    // Rent fee is part of the resource fee; the SDK >= v13 may expose it via
+    // `transactionData.resourceFee()` decomposition.  We attempt to extract it
+    // and fall back to a proportional estimate.
+    let rentFeeStroops = '0';
+    try {
+      const td =
+        simulationResult?.transactionData?.value?.() ??
+        simulationResult?.transactionData ??
+        null;
+      const rf: bigint =
+        typeof td?.resourceFee === 'function'
+          ? BigInt(td.resourceFee().toString())
+          : BigInt(0);
+      if (rf > BigInt(0)) {
+        rentFeeStroops = rf.toString();
+      } else if (BigInt(minResourceFee) > BigInt(0)) {
+        // Estimate: rent ≈ 30 % of total resource fee
+        rentFeeStroops = ((BigInt(minResourceFee) * BigInt(30)) / BigInt(100)).toString();
+      }
+    } catch {
+      if (BigInt(minResourceFee) > BigInt(0)) {
+        rentFeeStroops = ((BigInt(minResourceFee) * BigInt(30)) / BigInt(100)).toString();
+      }
+    }
+
+    const totalFeeStroops = (
+      BigInt(inclusionFeeStroops) + BigInt(minResourceFee)
+    ).toString();
+
+    // -----------------------------------------------------------------------
+    // Extract CPU / memory resource usage
+    // -----------------------------------------------------------------------
+    let cpuInstructions = 0;
+    let memoryBytes = 0;
+    try {
+      const resources = simulationResult?.result?.auth?.[0]?.resources?.() ?? null;
+      if (resources) {
+        cpuInstructions = Number(resources.instructions?.() ?? 0);
+        memoryBytes = Number(resources.readBytes?.() ?? 0);
+      }
+    } catch {
+      // best-effort
+    }
+
+    // -----------------------------------------------------------------------
+    // Footprint
+    // -----------------------------------------------------------------------
+    const { readFootprint, writeFootprint } = parseLedgerFootprint(simulationResult);
+    const rentBreakdown = buildRentBreakdown(BigInt(rentFeeStroops), writeFootprint);
+
+    // Archived entries need a separate RestoreFootprint transaction first.
+    const restoreFeeStroops = String(simulationResult?.restorePreamble?.minResourceFee ?? '0');
+
+    return {
+      inclusionFeeStroops,
+      resourceFeeStroops: minResourceFee,
+      rentFeeStroops,
+      totalFeeStroops,
+      totalFeeXlm: stroopsToXlm(totalFeeStroops),
+      inclusionFeeXlm: stroopsToXlm(inclusionFeeStroops),
+      resourceFeeXlm: stroopsToXlm(minResourceFee),
+      rentFeeXlm: stroopsToXlm(rentFeeStroops),
+      rentBreakdown,
+      restoreRequired: BigInt(restoreFeeStroops) > BigInt(0),
+      restoreFeeStroops,
+      restoreFeeXlm: stroopsToXlm(restoreFeeStroops),
+      readFootprint,
+      writeFootprint,
+      readCount: readFootprint.length,
+      writeCount: writeFootprint.length,
+      cpuInstructions,
+      memoryBytes,
+      success: true,
+    };
+  } catch (error: any) {
+    return failedFeeEstimate(error?.message ?? String(error));
+  }
 }
 
 /**
@@ -895,6 +1281,667 @@ export function parseFlashLoanOperationFromEvent(event: any): SorobanTransaction
 }
 
 /**
+ * Builds an atomic transaction operation tree from flat Soroban invocation records.
+ */
+export function buildFlashLoanOperationTree(
+  operations: SorobanTransactionOperationInput[],
+): FlashLoanOperationNode[] {
+  const nodes = new Map<string, FlashLoanOperationNode>();
+
+  for (const operation of operations) {
+    const type = normalizeOperationType(operation.type);
+    const asset =
+      operation.asset ||
+      (type === "swap" ? operation.tokenIn || operation.tokenOut || "" : "");
+    const amount =
+      type === "swap"
+        ? toBigIntAmount(operation.amountIn)
+        : toBigIntAmount(operation.amount);
+
+    if (!asset || amount === null) continue;
+
+    nodes.set(operation.id, {
+      id: operation.id,
+      parentId: operation.parentId,
+      type,
+      asset,
+      amount,
+      amountFormatted: formatAmount(amount),
+      contractId: operation.contractId,
+      children: [],
+    });
+  }
+
+  const roots: FlashLoanOperationNode[] = [];
+  for (const node of nodes.values()) {
+    if (node.parentId && nodes.has(node.parentId)) {
+      nodes.get(node.parentId)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  return roots;
+}
+
+function calculateNetArbitrageProfit(
+  operations: SorobanTransactionOperationInput[],
+  borrowedAsset: string,
+  borrowAmount: bigint,
+  repayAmount: bigint,
+): bigint {
+  for (const operation of operations) {
+    const explicitProfit = toBigIntAmount(operation.profit);
+    if (explicitProfit !== null && explicitProfit > 0n) {
+      return explicitProfit;
+    }
+  }
+
+  let swapDelta = 0n;
+  for (const operation of operations) {
+    if (normalizeOperationType(operation.type) !== "swap") continue;
+
+    const tokenIn = operation.tokenIn || "";
+    const tokenOut = operation.tokenOut || "";
+    const amountIn = toBigIntAmount(operation.amountIn);
+    const amountOut = toBigIntAmount(operation.amountOut);
+    if (amountIn === null || amountOut === null) continue;
+
+    if (tokenOut === borrowedAsset) swapDelta += amountOut;
+    if (tokenIn === borrowedAsset) swapDelta -= amountIn;
+  }
+
+  const surplus = borrowAmount + swapDelta - repayAmount;
+  return surplus > 0n ? surplus : 0n;
+}
+
+/**
+ * Detects atomic flash-loan borrow/repay invariants within a single transaction tree.
+ */
+export function detectFlashLoanInTransaction(
+  txHash: string,
+  operations: SorobanTransactionOperationInput[],
+  ledgerSeq?: number,
+): ParsedFlashLoanAlert | null {
+  if (!txHash || operations.length === 0) return null;
+
+  buildFlashLoanOperationTree(operations);
+
+  const borrowOps = operations.filter((op) => normalizeOperationType(op.type) === "borrow");
+  const repayOps = operations.filter((op) => normalizeOperationType(op.type) === "repay");
+
+  if (borrowOps.length === 0 || repayOps.length === 0) return null;
+
+  for (const borrowOp of borrowOps) {
+    const borrowedAsset = borrowOp.asset || "";
+    const borrowAmount = toBigIntAmount(borrowOp.amount);
+    if (!borrowedAsset || borrowAmount === null || borrowAmount <= 0n) continue;
+
+    const matchingRepay = repayOps.find((repayOp) => (repayOp.asset || "") === borrowedAsset);
+    if (!matchingRepay) continue;
+
+    const repayAmount = toBigIntAmount(matchingRepay.amount);
+    if (repayAmount === null || repayAmount < borrowAmount) continue;
+
+    let feeAmount = repayAmount - borrowAmount;
+    const explicitFee = toBigIntAmount(matchingRepay.fee ?? borrowOp.fee);
+    if (explicitFee !== null && explicitFee >= 0n) {
+      feeAmount = explicitFee;
+    }
+
+    const netArbitrageProfit = calculateNetArbitrageProfit(
+      operations,
+      borrowedAsset,
+      borrowAmount,
+      repayAmount,
+    );
+
+    return {
+      txHash,
+      ledgerSeq,
+      contractId: borrowOp.contractId || matchingRepay.contractId || "",
+      borrowedAsset,
+      borrowedAmount: formatAmount(borrowAmount),
+      feeAmount: formatAmount(feeAmount),
+      netArbitrageProfit: formatAmount(netArbitrageProfit),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Parses atomic transaction operation trees for flash-loan borrow/repay invariants.
+ */
+export class FlashLoanDetector {
+  parseOperationTree(operations: SorobanTransactionOperationInput[]): FlashLoanOperationNode[] {
+    return buildFlashLoanOperationTree(operations);
+  }
+
+  detect(transaction: {
+    txHash: string;
+    ledgerSeq?: number;
+    operations: SorobanTransactionOperationInput[];
+  }): ParsedFlashLoanAlert | null {
+    return detectFlashLoanInTransaction(
+      transaction.txHash,
+      transaction.operations,
+      transaction.ledgerSeq,
+    );
+  }
+
+  detectFromEvents(events: any[], txHash: string, ledgerSeq?: number): ParsedFlashLoanAlert | null {
+    const operations = events
+      .map((event) => parseFlashLoanOperationFromEvent(event))
+      .filter((operation): operation is SorobanTransactionOperationInput => operation !== null);
+
+    return this.detect({ txHash, ledgerSeq, operations });
+  }
+}
+
+export const flashLoanDetector = new FlashLoanDetector();
+
+export interface ParsedStakingRewardEvent {
+  contractId: string;
+  account: string;
+  rewardToken: string;
+  poolContractId: string;
+  amount: string;
+  rawAmount: bigint;
+  topic: string;
+  epoch?: number;
+  ledgerSeq?: number;
+  txHash?: string;
+}
+
+const STAKING_REWARD_TOPICS = new Set([
+  "distribute",
+  "reward",
+  "claim",
+  "emitted",
+  "emission",
+  "stake_reward",
+  "yield_distribution",
+  "reward_distributed",
+  "yield",
+  "reward_emission",
+  "staking_reward",
+]);
+
+/**
+ * Parses a raw Soroban RPC event into a staking / LP yield reward distribution event.
+ */
+export function parseStakingRewardEvent(event: any): ParsedStakingRewardEvent | null {
+  if (!event || !event.topic || event.topic.length === 0) {
+    return null;
+  }
+
+  const rawTopic = extractSwapTopicValue(event.topic[0]);
+  if (!rawTopic) return null;
+
+  const topicNormalized = rawTopic.toLowerCase();
+  if (!STAKING_REWARD_TOPICS.has(topicNormalized)) {
+    return null;
+  }
+
+  const value = event.value || event.data || {};
+  const contractId = event.contractId || "";
+
+  const account = asAddressString(
+    value.account ??
+      value.recipient ??
+      value.staker ??
+      value.user ??
+      value.to ??
+      (value.distribute && (value.distribute.account || value.distribute.recipient))
+  );
+
+  if (!account) return null;
+
+  const rewardToken = asAddressString(
+    value.reward_token ??
+      value.rewardToken ??
+      value.asset ??
+      value.token ??
+      value.reward_asset ??
+      value.rewardAsset ??
+      contractId
+  );
+
+  const poolContractId = asAddressString(
+    value.pool_contract_id ??
+      value.poolContractId ??
+      value.pool ??
+      value.lp_token ??
+      value.lpToken ??
+      value.staking_pool ??
+      contractId
+  );
+
+  const rawAmount = decodeScAmount(
+    value.amount ??
+      value.reward_amount ??
+      value.rewardAmount ??
+      value.yield ??
+      value.emission ??
+      value.reward_emission
+  );
+
+  if (rawAmount === null || rawAmount <= 0n) {
+    return null;
+  }
+
+  const epoch =
+    value.epoch !== undefined && value.epoch !== null && !Number.isNaN(Number(value.epoch))
+      ? Number(value.epoch)
+      : undefined;
+
+  return {
+    contractId,
+    account,
+    rewardToken,
+    poolContractId,
+    amount: formatTokenAmount(rawAmount),
+    rawAmount,
+    topic: topicNormalized,
+    epoch,
+    ledgerSeq: event.ledgerSeq || event.ledger,
+    txHash: event.txHash || event.transactionHash,
+  };
+}
+
+/**
+ * StakingRewardTracker aggregates cumulative LP yield emissions and staking reward distributions
+ * across Soroban liquidity pools per account.
+ */
+export class StakingRewardTracker {
+  private accountTotals = new Map<string, Map<string, bigint>>();
+  private poolTotals = new Map<string, bigint>();
+
+  /**
+   * Aggregates a single parsed reward event into cumulative tracker state.
+   */
+  processRewardEvent(event: ParsedStakingRewardEvent): {
+    accountCumulativeAmount: string;
+    poolCumulativeAmount: string;
+  } {
+    const { account, rewardToken, poolContractId, rawAmount } = event;
+
+    // Account cumulative total
+    if (!this.accountTotals.has(account)) {
+      this.accountTotals.set(account, new Map());
+    }
+    const tokenMap = this.accountTotals.get(account)!;
+    const currentAccountTotal = tokenMap.get(rewardToken) || 0n;
+    const newAccountTotal = currentAccountTotal + rawAmount;
+    tokenMap.set(rewardToken, newAccountTotal);
+
+    // Pool-specific account total
+    const poolKey = `${account}:${poolContractId}:${rewardToken}`;
+    const currentPoolTotal = this.poolTotals.get(poolKey) || 0n;
+    const newPoolTotal = currentPoolTotal + rawAmount;
+    this.poolTotals.set(poolKey, newPoolTotal);
+
+    return {
+      accountCumulativeAmount: formatTokenAmount(newAccountTotal),
+      poolCumulativeAmount: formatTokenAmount(newPoolTotal),
+    };
+  }
+
+  /**
+   * Processes a batch of raw Soroban RPC events, parsing reward events and aggregating yield emissions.
+   */
+  processEventBatch(events: any[]): {
+    event: ParsedStakingRewardEvent;
+    accountCumulativeAmount: string;
+    poolCumulativeAmount: string;
+  }[] {
+    const results: {
+      event: ParsedStakingRewardEvent;
+      accountCumulativeAmount: string;
+      poolCumulativeAmount: string;
+    }[] = [];
+
+    for (const rawEvent of events) {
+      const parsed = parseStakingRewardEvent(rawEvent);
+      if (!parsed) continue;
+
+      const totals = this.processRewardEvent(parsed);
+      results.push({
+        event: parsed,
+        accountCumulativeAmount: totals.accountCumulativeAmount,
+        poolCumulativeAmount: totals.poolCumulativeAmount,
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Gets cumulative yield emission for a specific account and reward token.
+   */
+  getCumulativeYield(account: string, rewardToken: string = "default"): string {
+    const tokenMap = this.accountTotals.get(account);
+    if (!tokenMap) return "0";
+
+    if (rewardToken === "default") {
+      let total = 0n;
+      for (const amount of tokenMap.values()) {
+        total += amount;
+      }
+      return formatTokenAmount(total);
+    }
+
+    const amount = tokenMap.get(rewardToken) || 0n;
+    return formatTokenAmount(amount);
+  }
+
+  /**
+   * Gets cumulative yield emission for an account within a specific pool and reward token.
+   */
+  getCumulativeYieldByPool(account: string, poolContractId: string, rewardToken: string): string {
+    const poolKey = `${account}:${poolContractId}:${rewardToken}`;
+    const amount = this.poolTotals.get(poolKey) || 0n;
+    return formatTokenAmount(amount);
+  }
+
+  /**
+   * Resets all accumulated yield metrics.
+   */
+  reset(): void {
+    this.accountTotals.clear();
+    this.poolTotals.clear();
+  }
+}
+
+export const stakingRewardTracker = new StakingRewardTracker();
+
+export class SacMintBurnAnalyticsAggregator {
+  private mintTotals = new Map<string, bigint>();
+  private burnTotals = new Map<string, bigint>();
+
+  processParsedEvent(event: ParsedSorobanMintBurn): void {
+    const contractId = event.contractId || "unknown";
+    const amount = event.rawAmount ?? 0n;
+    if (event.eventType === "MINT") {
+      this.mintTotals.set(contractId, (this.mintTotals.get(contractId) || 0n) + amount);
+    } else {
+      this.burnTotals.set(contractId, (this.burnTotals.get(contractId) || 0n) + amount);
+    }
+  }
+
+  processEventBatch(events: any[]): void {
+    for (const rawEvent of events) {
+      const parsed = parseSorobanMintBurnEvent(rawEvent);
+      if (parsed) this.processParsedEvent(parsed);
+    }
+  }
+
+  getCumulativeMintedAmount(contractId: string): string {
+    return formatTokenAmount(this.mintTotals.get(contractId) || 0n);
+  }
+
+  getCumulativeBurnedAmount(contractId: string): string {
+    return formatTokenAmount(this.burnTotals.get(contractId) || 0n);
+  }
+
+  getNetSupply(contractId: string): string {
+    return formatTokenAmount(
+      (this.mintTotals.get(contractId) || 0n) -
+        (this.burnTotals.get(contractId) || 0n),
+    );
+  }
+
+  reset(): void {
+    this.mintTotals.clear();
+    this.burnTotals.clear();
+  }
+}
+
+export const sacMintBurnAnalyticsAggregator = new SacMintBurnAnalyticsAggregator();
+
+export interface SorobanErrorInfo {
+  type: 'custom_error' | 'panic' | 'host_error' | 'invocation_error';
+  code?: number;
+  message: string;
+  contractId?: string;
+  function?: string;
+  details?: string;
+}
+
+export interface SorobanDiagnosticResult {
+  errors: SorobanErrorInfo[];
+  summary: string;
+  contractId?: string;
+}
+
+const SOROBAN_PANIC_CODES: Record<number, string> = {
+  1: 'Assertion failed',
+  2: 'Arithmetic overflow',
+  3: 'Division by zero',
+  4: 'Index out of bounds',
+  5: 'Invalid value',
+  6: 'Missing value',
+  7: 'Already exists',
+  8: 'Unexpected error',
+  9: 'Memory limit exceeded',
+  10: 'Quota exceeded',
+  11: 'Execution limit exceeded',
+  12: 'CPU instruction limit exceeded',
+  13: 'Stack limit exceeded',
+  14: 'Storage limit exceeded',
+  15: 'Budget exceeded',
+  16: 'Context error',
+  17: 'Invalid argument',
+  18: 'Invalid data',
+  19: 'Invalid contract',
+  20: 'Invalid invocation',
+};
+
+const SOROBAN_HOST_ERROR_CODES: Record<number, string> = {
+  100: 'Invalid XDR',
+  101: 'Invalid ledger entry',
+  102: 'Invalid contract',
+  103: 'Invalid invocation',
+  104: 'Missing entry',
+  105: 'Already exists',
+  106: 'Invalid auth',
+  107: 'Missing auth',
+  108: 'Too many operations',
+  109: 'Too many bytes',
+  110: 'Fee bumped',
+  111: 'No funds',
+  112: 'Bad sequence',
+  113: 'Insufficient balance',
+  114: 'No source account',
+  115: 'Invalid signature',
+  116: 'Too many signatures',
+  117: 'Invalid threshold',
+  118: 'Low threshold',
+  119: 'Op too complex',
+  120: 'No network',
+  121: 'Network error',
+  122: 'Transaction too large',
+  123: 'Duplicate operation',
+  124: 'Invalid memo',
+  125: 'Memo required',
+  126: 'Fee too low',
+  127: 'Too many ledgers',
+  128: 'Invalid limit',
+  129: 'Operation disabled',
+  130: 'Contract not found',
+  131: 'Function not found',
+  132: 'Bad auth',
+  133: 'Invalid argument',
+  134: 'Internal error',
+};
+
+function parsePanicCode(code: number): string {
+  return SOROBAN_PANIC_CODES[code] || `Unknown panic code: ${code}`;
+}
+
+function parseHostErrorCode(code: number): string {
+  return SOROBAN_HOST_ERROR_CODES[code] || `Unknown host error code: ${code}`;
+}
+
+function parseCustomError(result: any): SorobanErrorInfo | null {
+  try {
+    if (!result?.error || typeof result.error !== 'string') return null;
+
+    const errorMatch = result.error.match(/Error\(Contract, (\d+)\)/);
+    if (errorMatch) {
+      const code = parseInt(errorMatch[1], 10);
+      return {
+        type: 'custom_error',
+        code,
+        message: `Custom contract error ${code}`,
+        contractId: result.contractId,
+        function: result.function,
+        details: result.error,
+      };
+    }
+
+    const panicMatch = result.error.match(/Panic\((\d+)\)/);
+    if (panicMatch) {
+      const code = parseInt(panicMatch[1], 10);
+      return {
+        type: 'panic',
+        code,
+        message: parsePanicCode(code),
+        contractId: result.contractId,
+        function: result.function,
+        details: result.error,
+      };
+    }
+
+    const hostErrorMatch = result.error.match(/HostError\((\d+)\)/);
+    if (hostErrorMatch) {
+      const code = parseInt(hostErrorMatch[1], 10);
+      return {
+        type: 'host_error',
+        code,
+        message: parseHostErrorCode(code),
+        contractId: result.contractId,
+        function: result.function,
+        details: result.error,
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parseInvocationError(result: any): SorobanErrorInfo | null {
+  try {
+    if (!result?.error) return null;
+
+    const errorStr = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
+
+    if (errorStr.includes('Error(Contract,')) {
+      return parseCustomError(result);
+    }
+
+    if (errorStr.includes('Panic(')) {
+      return parseCustomError(result);
+    }
+
+    if (errorStr.includes('HostError(')) {
+      return parseCustomError(result);
+    }
+
+    return {
+      type: 'invocation_error',
+      message: errorStr,
+      contractId: result.contractId,
+      function: result.function,
+      details: errorStr,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function parseSorobanDiagnosticError(
+  simulationResult: any,
+  executionResult?: any,
+): SorobanDiagnosticResult {
+  const errors: SorobanErrorInfo[] = [];
+  let contractId: string | undefined;
+
+  if (simulationResult) {
+    const simError = parseInvocationError(simulationResult);
+    if (simError) {
+      errors.push(simError);
+      contractId = simError.contractId;
+    }
+  }
+
+  if (executionResult) {
+    const execError = parseInvocationError(executionResult);
+    if (execError) {
+      errors.push(execError);
+      contractId = contractId || execError.contractId;
+    }
+  }
+
+  const summary = errors.length === 0
+    ? 'No errors detected'
+    : errors.length === 1
+    ? errors[0].message
+    : `${errors.length} errors detected: ${errors.map(e => e.message).join(', ')}`;
+
+  return {
+    errors,
+    summary,
+    contractId,
+  };
+}
+
+export function decodeSorobanErrorFromXdr(xdrBase64: string): SorobanErrorInfo | null {
+  try {
+    const scError = StellarSdk.xdr.ScError.fromXDR(Buffer.from(xdrBase64, 'base64'));
+    const errorType = scError.switch();
+    const typeName: string = (errorType as { name?: string }).name ?? String(errorType);
+
+    // The sceContract arm carries a ScErrorCode in contractCode()
+    if (typeName === 'sceContract') {
+      const contractCode = scError.contractCode();
+      return {
+        type: 'custom_error',
+        code: contractCode,
+        message: `Custom contract error (${contractCode})`,
+        details: `ScError(sceContract, ${contractCode})`,
+      };
+    }
+
+    // All other system-level errors (sceWasmVm, sceContext, sceStorage, sceObject,
+    // sceCrypto, sceEvents, sceBudget, sceValue, sceAuth) carry a ScErrorCode in code()
+    const code = scError.code() as unknown as { name: string; value: number };
+    return {
+      type: 'host_error',
+      code: code.value,
+      message: `Soroban ${typeName} error: ${code.name} (${code.value})`,
+      details: `ScError(${typeName}, ${code.name})`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SAC metadata auto-discovery
+// ---------------------------------------------------------------------------
+
+export interface SacMetadata {
+  contractId: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+}
+
+/**
  * Simulates a read-only method invocation on a Soroban contract via RPC.
  */
 export async function simulateContractCall(
@@ -915,7 +1962,7 @@ export async function simulateContractCall(
 
     const tx = new StellarSdk.TransactionBuilder(dummySource, {
       fee: '100',
-      networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      networkPassphrase: stellarNetwork.networkPassphrase,
     })
       .addOperation(op)
       .setTimeout(30)
