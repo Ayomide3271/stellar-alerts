@@ -1986,19 +1986,33 @@ export async function simulateContractCall(
   }
 }
 
-/**
- * Queries SAC token metadata (decimals, symbol, name) from Soroban RPC.
- */
-export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMetadata> {
-  const fallback: SacMetadata = {
+/** How long a fallback (undiscovered) SAC result is cached, so a flaky RPC is retried soon. */
+const SAC_FALLBACK_TTL = 60;
+
+interface SacDiscoveryResult {
+  metadata: SacMetadata;
+  /** True only when `decimals()` was actually read from the contract. */
+  discovered: boolean;
+}
+
+function defaultSacMetadata(contractId: string): SacMetadata {
+  return {
     contractId,
     name: 'Unknown Token',
     symbol: contractId ? contractId.substring(0, 8) : 'Unknown',
     decimals: 7,
   };
+}
+
+/**
+ * Queries `decimals()`, `symbol()` and `name()` on the SAC contract and reports
+ * whether the decimals were genuinely discovered (as opposed to defaulted).
+ */
+async function discoverSacMetadata(contractId: string): Promise<SacDiscoveryResult> {
+  const fallback = defaultSacMetadata(contractId);
 
   if (!contractId) {
-    return fallback;
+    return { metadata: fallback, discovered: false };
   }
 
   try {
@@ -2010,12 +2024,16 @@ export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMe
     ]);
 
     let decimals = fallback.decimals;
+    let discovered = false;
     if (typeof decimalsVal === 'number' && Number.isInteger(decimalsVal) && decimalsVal >= 0) {
       decimals = decimalsVal;
+      discovered = true;
     } else if (typeof decimalsVal === 'bigint') {
       decimals = Number(decimalsVal);
+      discovered = true;
     } else if (typeof decimalsVal === 'string' && /^\d+$/.test(decimalsVal)) {
       decimals = parseInt(decimalsVal, 10);
+      discovered = true;
     }
 
     const symbol =
@@ -2030,20 +2048,29 @@ export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMe
         ? symbol
         : fallback.name;
 
-    return {
-      contractId,
-      name,
-      symbol,
-      decimals,
-    };
+    return { metadata: { contractId, name, symbol, decimals }, discovered };
   } catch (error: any) {
     console.warn(`[SorobanRPC] Error fetching SAC metadata for contract ${contractId}:`, error.message);
-    return fallback;
+    return { metadata: fallback, discovered: false };
   }
 }
 
 /**
+ * Queries SAC token metadata (decimals, symbol, name) from Soroban RPC.
+ */
+export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMetadata> {
+  return (await discoverSacMetadata(contractId)).metadata;
+}
+
+/** In-flight discoveries, so concurrent first sightings share one RPC round-trip. */
+const inflightSacDiscoveries = new Map<string, Promise<SacMetadata>>();
+
+/**
  * Retrieves SAC metadata from Redis cache (24h TTL) or discovers it from Soroban RPC.
+ *
+ * Successful discoveries are cached for 24h. A failed discovery returns the
+ * 7-decimal default but is only cached briefly, so a transient RPC error can
+ * never pin wrong decimals for a day.
  */
 export async function getSacMetadata(
   contractId: string,
@@ -2067,9 +2094,33 @@ export async function getSacMetadata(
     }
   }
 
-  const metadata = await fetchSacMetadataFromRpc(contractId);
-  await setJson(cacheKey, metadata, SAC_METADATA_TTL);
-  return metadata;
+  const inflight = inflightSacDiscoveries.get(contractId);
+  if (inflight) {
+    return inflight;
+  }
+
+  const discovery = (async () => {
+    const { metadata, discovered } = await discoverSacMetadata(contractId);
+    await setJson(cacheKey, metadata, discovered ? SAC_METADATA_TTL : SAC_FALLBACK_TTL);
+    return metadata;
+  })().finally(() => {
+    inflightSacDiscoveries.delete(contractId);
+  });
+
+  inflightSacDiscoveries.set(contractId, discovery);
+  return discovery;
+}
+
+/**
+ * Re-formats a parsed event's raw amount using the contract's real decimals.
+ * Events without a raw amount are returned untouched.
+ */
+export async function withSacDecimals<T extends { contractId: string; amount: string; rawAmount?: bigint }>(
+  parsed: T
+): Promise<T> {
+  if (parsed.rawAmount === undefined || !parsed.contractId) return parsed;
+  const { formattedAmount } = await formatSacAmountWithDiscovery(parsed.rawAmount, parsed.contractId);
+  return { ...parsed, amount: formattedAmount };
 }
 
 /**
