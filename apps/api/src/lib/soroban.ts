@@ -15,7 +15,8 @@ import type { EnrichedSorobanEvent, SorobanRpcEvent } from "../types/soroban-eve
 
 export const SOROBAN_RPC_URL = stellarNetwork.sorobanRpcUrl;
 const LEDGER_BATCH_SIZE = 100;
-const MAX_ACTIVE_CONTRACTS = 100;
+/** Maximum number of distinct contracts the router tracks at once. */
+export const MAX_ACTIVE_CONTRACTS = 100;
 
 export const sorobanServer = new (StellarSdk as any).rpc.Server(
   SOROBAN_RPC_URL,
@@ -48,11 +49,26 @@ export async function loadContractRegistry(): Promise<
   Map<string, ContractRegistry>
 > {
   try {
-    const subscriptions = await prisma.sorobanContractSubscription.findMany({
+    const allSubscriptions = await prisma.sorobanContractSubscription.findMany({
       where: { isActive: true },
       orderBy: { createdAt: "desc" },
-      take: MAX_ACTIVE_CONTRACTS,
     });
+
+    // The cap applies to distinct contracts, not subscription rows: many users
+    // can share one contract. Newest contracts win; every subscription of an
+    // admitted contract is kept so no subscriber is silently dropped.
+    const admitted = new Set<string>();
+    const subscriptions = allSubscriptions.filter((sub) => {
+      if (admitted.has(sub.contractId)) return true;
+      if (admitted.size >= MAX_ACTIVE_CONTRACTS) return false;
+      admitted.add(sub.contractId);
+      return true;
+    });
+    if (admitted.size >= MAX_ACTIVE_CONTRACTS && subscriptions.length < allSubscriptions.length) {
+      console.warn(
+        `[Registry] Contract limit (${MAX_ACTIVE_CONTRACTS}) reached; ${allSubscriptions.length - subscriptions.length} subscription(s) on additional contracts are not being watched`,
+      );
+    }
 
     contractRegistry.clear();
 
@@ -100,6 +116,23 @@ export async function loadContractRegistry(): Promise<
 }
 
 /**
+ * Extracts the event name (first topic, conventionally a symbol such as
+ * "transfer") from an event; "default" when the topic array is empty/missing.
+ */
+export function getEventTopicName(event: Pick<SorobanRpcEvent, "topic">): string {
+  const firstTopic = Array.isArray(event.topic) ? event.topic[0] : undefined;
+  return (
+    (typeof firstTopic === "string"
+      ? firstTopic
+      : typeof firstTopic === "object" &&
+        firstTopic !== null &&
+        "symbol" in firstTopic
+      ? String((firstTopic as { symbol: unknown }).symbol)
+      : null) ?? "default"
+  );
+}
+
+/**
  * Routes an event to matching subscribed users based on contract ID and topic.
  *
  * Accepts a typed `SorobanRpcEvent` instead of `any`, so callers are
@@ -116,18 +149,7 @@ export function routeEventToUsers(
   const contract = contractRegistry.get(contractId);
   if (!contract) return routes;
 
-  // Determine topic from event.  The first element of the raw topic array
-  // is conventionally the event name symbol (e.g. "transfer"); fall back
-  // to "default" for events with an empty or missing topic array.
-  const firstTopic = Array.isArray(event.topic) ? event.topic[0] : undefined;
-  const topic =
-    (typeof firstTopic === 'string'
-      ? firstTopic
-      : typeof firstTopic === 'object' &&
-        firstTopic !== null &&
-        'symbol' in firstTopic
-      ? String((firstTopic as { symbol: unknown }).symbol)
-      : null) ?? 'default';
+  const topic = getEventTopicName(event);
 
   // Check for exact topic match
   let matchedUserIds = contract.topicRoutes.get(topic);
@@ -686,6 +708,52 @@ export async function fetchContractEvents(
     );
     return [];
   }
+}
+
+/** Soroban RPC allows 5 filters per request, each with up to 5 contract IDs. */
+const EVENT_FILTERS_PER_REQUEST = 5;
+const CONTRACT_IDS_PER_FILTER = 5;
+export const CONTRACTS_PER_EVENT_REQUEST = EVENT_FILTERS_PER_REQUEST * CONTRACT_IDS_PER_FILTER;
+
+/**
+ * Fetches events for many contracts at once, packing up to
+ * {@link CONTRACTS_PER_EVENT_REQUEST} contract IDs into each `getEvents`
+ * request, so 100 subscribed contracts cost 4 RPC calls instead of 100.
+ * A failing batch is logged and skipped without losing the others.
+ */
+export async function fetchEventsForContracts(
+  contractIds: string[],
+  startLedger: number,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<any[]> {
+  const unique = Array.from(new Set(contractIds.filter(Boolean)));
+  const timeoutMs = options.timeoutMs ?? env.SOROBAN_RPC_TIMEOUT_MS;
+  const events: any[] = [];
+
+  for (let i = 0; i < unique.length; i += CONTRACTS_PER_EVENT_REQUEST) {
+    const batch = unique.slice(i, i + CONTRACTS_PER_EVENT_REQUEST);
+    const filters = [];
+    for (let j = 0; j < batch.length; j += CONTRACT_IDS_PER_FILTER) {
+      filters.push({ type: "contract", contractIds: batch.slice(j, j + CONTRACT_IDS_PER_FILTER) });
+    }
+
+    try {
+      const response: any = await withDeadline(
+        () => sorobanServer.getEvents({ startLedger, filters }),
+        timeoutMs,
+        options.signal,
+        "Soroban RPC getEvents (multi-contract)",
+      );
+      events.push(...(response.events || []));
+    } catch (error: any) {
+      console.error(
+        `[SorobanRPC] Error fetching events for ${batch.length} contract(s):`,
+        error.message,
+      );
+    }
+  }
+
+  return events;
 }
 
 // ---------------------------------------------------------------------------
