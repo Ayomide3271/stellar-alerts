@@ -42,4 +42,37 @@ describe('CryptoVault', () => {
     const oldEncrypted = new CryptoVault('old-key', '1').encrypt('data');
     expect(() => vaultWithNoOldKeys.decrypt(oldEncrypted)).toThrow('Unknown encryption key version: 1');
   });
+
+  it('should encrypt and decrypt using structured parts matching DB schema columns', () => {
+    const original = 'whsec_secret_key_db_column_value';
+    const parts = vault.encryptParts(original);
+
+    expect(parts.version).toBe('1');
+    expect(parts.iv).toBeTruthy();
+    expect(parts.authTag).toBeTruthy();
+    expect(parts.ciphertext).toBeTruthy();
+
+    expect(vault.decryptParts(parts)).toBe(original);
+    expect(
+      vault.decryptParts({
+        keyVersion: parts.version,
+        secretIv: parts.iv,
+        secretAuthTag: parts.authTag,
+        secretCiphertext: parts.ciphertext,
+      })
+    ).toBe(original);
+  });
+
+  it('should re-encrypt secrets from older key versions to current active key version', () => {
+    const oldVault = new CryptoVault('legacy-master-key-32-chars-long!', '1');
+    const rotatedVault = new CryptoVault('next-gen-master-key-32-chars-long!', '2', {
+      '1': 'legacy-master-key-32-chars-long!',
+    });
+
+    const oldSecret = oldVault.encrypt('webhook_key_to_rotate');
+    const reencrypted = rotatedVault.reencrypt(oldSecret);
+
+    expect(reencrypted.startsWith('2:')).toBe(true);
+    expect(rotatedVault.decrypt(reencrypted)).toBe('webhook_key_to_rotate');
+  });
 });
