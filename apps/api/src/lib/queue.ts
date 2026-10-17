@@ -495,6 +495,7 @@ export function createRedisConnectionConfig() {
   const sentinelsRaw = process.env.REDIS_SENTINELS;
   const masterName = process.env.REDIS_SENTINEL_MASTER_NAME || "mymaster";
   const sentinelPassword = process.env.REDIS_SENTINEL_PASSWORD;
+  const redisPassword = process.env.REDIS_PASSWORD;
 
   if (sentinelsRaw) {
     const sentinels = sentinelsRaw.split(',').map((s) => {
@@ -507,14 +508,16 @@ export function createRedisConnectionConfig() {
     return {
       sentinels,
       name: masterName,
-      sentinelPassword,
+      sentinelPassword: sentinelPassword || undefined,
+      password: redisPassword || undefined,
       role: 'master',
       enableReadyCheck: false,
       maxRetriesPerRequest: null,
+      sentinelRetryStrategy: (times: number) => Math.min(times * 100, 3000),
       retryStrategy: (times: number) => Math.min(times * 100, 3000),
       reconnectOnError: (err: Error) => {
-        if (err.message && err.message.includes('READONLY')) {
-          queueLog.warn('[Queue] ⚡ Master promoted during Sentinel failover (READONLY received), reconnecting...');
+        if (err.message && (err.message.includes('READONLY') || err.message.includes('ETIMEDOUT') || err.message.includes('ECONNREFUSED') || err.message.includes('ECONNRESET'))) {
+          console.warn('[Queue] ⚡ Master promoted or network hiccup during Sentinel failover, reconnecting...', err.message);
           return true;
         }
         return false;
@@ -522,13 +525,33 @@ export function createRedisConnectionConfig() {
     };
   }
 
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl && redisUrl.startsWith('redis://')) {
+    try {
+      const parsed = new URL(redisUrl);
+      return {
+        host: parsed.hostname || "localhost",
+        port: parseInt(parsed.port || "6379", 10),
+        username: parsed.username || undefined,
+        password: parsed.password || redisPassword || undefined,
+        lazyConnect: true,
+        maxRetriesPerRequest: null,
+        retryStrategy: (times: number) => Math.min(times * 100, 3000),
+      };
+    } catch {
+      // Fallback to standard host/port below
+    }
+  }
+
   const redisHost = process.env.REDIS_HOST || "localhost";
   const redisPort = parseInt(process.env.REDIS_PORT || "6379", 10);
   return {
     host: redisHost,
     port: redisPort,
+    password: redisPassword || undefined,
     lazyConnect: true,
     maxRetriesPerRequest: null,
+    retryStrategy: (times: number) => Math.min(times * 100, 3000),
   };
 }
 
@@ -562,6 +585,23 @@ try {
     if (alertQueueEvents) await alertQueueEvents.close().catch(() => {});
     if (alertQueue) await alertQueue.close().catch(() => {});
     if (dlqQueue) await dlqQueue.close().catch(() => {});
+  });
+
+  // Attach error listeners to ensure reconnects during Sentinel master failover do not crash Node process
+  alertQueue.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'AlertQueue transient connection error during failover');
+  });
+
+  dlqQueue.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'DLQQueue transient connection error during failover');
+  });
+
+  alertQueueEvents.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'AlertQueueEvents transient connection error during failover');
+  });
+
+  alertWorker.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'AlertWorker transient connection error during failover');
   });
 
   alertQueueEvents.on("failed", async ({ jobId, failedReason }) => {

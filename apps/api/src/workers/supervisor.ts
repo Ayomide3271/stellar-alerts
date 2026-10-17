@@ -61,14 +61,14 @@ export class WorkerSupervisor {
     log.info(`[Supervisor] 🐎 Spawned worker "${name}" (pid ${child.pid})`);
 
     child.on('message', (message: any) => {
-      if (message?.type === 'pong') {
+      if (message === 'pong' || message?.type === 'pong') {
         this.clearPongTimeout(worker);
       }
     });
 
     child.on('exit', (code, signal) => {
-      log.error(
-        `[Supervisor] ★‍ Worker "${name}" (pid ${child.pid}) exited — code=${code} signal=${signal}. ` +
+      console.error(
+        `[Supervisor] ⚠️ Worker "${name}" (pid ${child.pid}) exited — code=${code} signal=${signal}. ` +
         `Restart #${worker.restartCount + 1} scheduled.`
       );
       this.stopHeartbeat(worker);
@@ -105,8 +105,8 @@ export class WorkerSupervisor {
       child.send({ type: 'ping' });
 
       worker.pongTimeout = setTimeout(() => {
-        log.error(
-          `[Supervisor] ⍟– Worker "${worker.name}" (pid ${child.pid}) missed its heartbeat and appears frozen. ` +
+        console.error(
+          `[Supervisor] ⚠️ Worker "${worker.name}" (pid ${child.pid}) missed its heartbeat and appears frozen. ` +
             'Killing so it can be restarted.'
         );
         child.kill('SIGKILL');
@@ -166,9 +166,9 @@ export function startSupervisor(): WorkerSupervisor {
 
 export function registerSupervisorHeartbeat() {
   if (process.send) {
-    process.on('message', (msg) => {
-      if (msg === 'ping') {
-        process.send!('pong');
+    process.on('message', (msg: any) => {
+      if (msg === 'ping' || msg?.type === 'ping') {
+        process.send?.({ type: 'pong', pid: process.pid });
       }
     });
   }
