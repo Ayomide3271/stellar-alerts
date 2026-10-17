@@ -60,11 +60,13 @@ const log = createLogger({ module: 'WatcherWorker' });
  * frozen and killed (see workers/supervisor.ts heartbeat logic).
  */
 function registerSupervisorHeartbeat() {
-  process.on('message', (message: unknown) => {
-    if (isPingMessage(message)) {
-      process.send?.({ type: 'pong' });
-    }
-  });
+  if (process.send) {
+    process.on('message', (message: any) => {
+      if (message === 'ping' || message?.type === 'ping') {
+        process.send?.({ type: 'pong', pid: process.pid });
+      }
+    });
+  }
 }
 
 export async function processPaymentRecord(
