@@ -290,3 +290,31 @@ describe('Webhook HMAC Signer & Replay Prevention', () => {
     });
   });
 });
+
+describe('buildWebhookSignatureHeaders (X-Stellar-Alerts-Signature)', () => {
+  const secret = 'whsec_test_secret';
+  const payload = JSON.stringify({ event: 'payment.received', amount: '10' });
+
+  it('emits an HMAC SHA256 signature in the X-Stellar-Alerts-Signature header', async () => {
+    const { buildWebhookSignatureHeaders, STELLAR_ALERTS_SIGNATURE_HEADER } = await import('../webhook-signer');
+    const crypto = await import('crypto');
+    const headers = buildWebhookSignatureHeaders(payload, secret, 1700000000000, 'nonce-1');
+
+    expect(STELLAR_ALERTS_SIGNATURE_HEADER).toBe('X-Stellar-Alerts-Signature');
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(`1700000000000.nonce-1.${payload}`)
+      .digest('hex');
+    expect(headers['X-Stellar-Alerts-Signature']).toBe(`t=1700000000000,n=nonce-1,v1=${expected}`);
+  });
+
+  it('produces a header that verifies, and keeps the legacy header identical', async () => {
+    const { buildWebhookSignatureHeaders } = await import('../webhook-signer');
+    const headers = buildWebhookSignatureHeaders(payload, secret);
+
+    expect(headers['X-Stellar-Signature']).toBe(headers['X-Stellar-Alerts-Signature']);
+    expect(verifyWebhookSignatureSync(payload, headers['X-Stellar-Alerts-Signature'], secret)).toBe(true);
+    expect(verifyWebhookSignatureSync(payload, headers['X-Stellar-Alerts-Signature'], 'wrong')).toBe(false);
+    expect(verifyWebhookSignatureSync(`${payload} `, headers['X-Stellar-Alerts-Signature'], secret)).toBe(false);
+  });
+});
