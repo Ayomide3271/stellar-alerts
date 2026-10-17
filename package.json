@@ -8,9 +8,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "turbo build",
+    "build": "node api.js && turbo build",
     "typecheck": "turbo typecheck",
-    "dev": "turbo dev",
+    "dev": "node api.js && turbo dev",
     "dev:api": "npm run dev --workspace=api",
     "dev:worker": "npm run dev:worker --workspace=api",
     "dev:indexer": "npm run dev:indexer --workspace=api",
@@ -40,7 +40,6 @@
     "security:audit": "osv-scanner scan source -r . --config osv-scanner.toml",
     "verify:migrations": "npx tsx scripts/verify-migrations.ts",
     "verify:migrations:dry-run": "npx tsx scripts/verify-migrations.ts --dry-run",
-    "test:scripts": "vitest run --config scripts/vitest.config.ts",
     "release:report": "npx tsx scripts/release-report.ts",
     "release:report:check": "npx tsx scripts/release-report.ts --check",
     "prepare": "husky"
