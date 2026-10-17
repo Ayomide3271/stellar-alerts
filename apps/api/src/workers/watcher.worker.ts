@@ -926,6 +926,23 @@ export async function runWatcher() {
     });
   };
 
+  // Start Horizon SSE streams for live ingestion (#523)
+  const wallets = await prisma.wallet.findMany();
+  const streamClosures: Array<() => void> = [];
+  for (const wallet of wallets) {
+    try {
+      const close = await startHorizonSSEStream(wallet);
+      streamClosures.push(close);
+      watcherLifecycle.registerCleanup(`sse-stream-${wallet.id}`, close);
+    } catch (err: any) {
+      log.error(
+        `[WatcherWorker] Failed to start SSE stream for wallet ${wallet.publicKey}:`,
+        err?.message || err,
+      );
+    }
+  }
+
+  // Also keep a lightweight periodic poll as fallback for catch-up safety
   await poll();
 
   const pollTimer = setInterval(poll, 30000);
@@ -1006,6 +1023,34 @@ async function processSorobanContractEvents(contractId: string) {
                 },
                 update: {},
               });
+
+              // Also store as Payment if this transfer is relevant to a watched wallet (#528)
+              const wallets = await prisma.wallet.findMany({
+                where: {
+                  OR: [
+                    { publicKey: parsed.to },
+                    { publicKey: parsed.from },
+                    { userId: { in: route.userIds } },
+                  ],
+                },
+              });
+              for (const wallet of wallets) {
+                const txHash = (event.txHash || `${ledgerSeq}-${event.topic?.toString() || ''}`) as string;
+                const receivedAt = new Date(Date.now());
+                const sacRecord: any = {
+                  type: 'contract_event',
+                  contractId: parsed.contractId,
+                  transaction_hash: txHash,
+                  created_at: receivedAt.toISOString(),
+                  topic: event.topic,
+                  value: event.value || event.data || {},
+                };
+                try {
+                  await processPaymentRecord(wallet, sacRecord);
+                } catch (e) {
+                  // best effort
+                }
+              }
             } catch (err: unknown) {
               const prismaErr = err as { code?: string; message?: string };
               if (prismaErr.code !== "P2025") {
