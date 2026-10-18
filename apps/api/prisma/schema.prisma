@@ -80,8 +80,6 @@ model Payment {
   deliveries        NotificationDelivery[]
   checksum          PaymentChecksum?
 
-  @@index([txHash])
-  @@index([receivedAt])
   @@index([walletId])
   @@index([asset])
   @@index([walletId, receivedAt])
