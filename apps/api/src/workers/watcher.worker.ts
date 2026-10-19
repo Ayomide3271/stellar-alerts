@@ -25,7 +25,7 @@ import { trace, SpanStatusCode, TraceFlags } from '@opentelemetry/api';
 
 export const watcherLifecycle = new WorkerLifecycleManager({
   workerName: 'WatcherWorker',
-  drainTimeoutMs: 10_000,
+  drainTimeoutMs: 5_000,
   maxInFlight: 20,
   autoRegisterSignals: true,
 });
@@ -632,6 +632,7 @@ export type StartHorizonSSEStreamOptions = {
   maxReconnectAttempts?: number;
   maxReconnectDelayMs?: number;
   maxQueuedMessages?: number;
+  heartbeatTimeoutMs?: number;
 };
 
 export const streamMetrics = {
@@ -684,7 +685,7 @@ export async function startHorizonSSEStream(
       queueLength++;
       const run = processingChain
         .then(async () => {
-          if (generation === streamGeneration) await task();
+          if (!isClosed) await task();
         })
         .catch((err: unknown) => {
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -734,13 +735,16 @@ export async function startHorizonSSEStream(
       }, reconnectDelay);
     };
 
+    const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 30_000;
+
     const resetHeartbeat = () => {
       if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
       heartbeatTimeout = setTimeout(() => {
         streamMetrics.heartbeatTimeouts++;
-        log.warn(`[WatcherStream] ⚠️ Heartbeat timeout for ${wallet.publicKey.substring(0, 8)}... Reconnecting...`);
+        streamMetrics.reconnects++;
+        log.warn(`[WatcherStream] ⚠️ Heartbeat timeout (${heartbeatTimeoutMs}ms) for ${wallet.publicKey.substring(0, 8)}... Reconnecting...`);
         connect();
-      }, 60000);
+      }, heartbeatTimeoutMs);
     };
 
     const connect = async () => {
@@ -1099,12 +1103,58 @@ async function processSorobanContractEvents(contractId: string) {
   });
 }
 
+export interface WatcherShutdownResources {
+  watcherLifecycle?: WorkerLifecycleManager;
+  prisma?: { $disconnect: () => Promise<unknown> };
+  watcherIntervalId?: NodeJS.Timeout;
+  exitFn?: (code: number) => void;
+  timeoutMs?: number;
+}
+
+export function createWatcherShutdownHandler(resources: WatcherShutdownResources = {}) {
+  let isShuttingDown = false;
+  return async (signal = 'SIGTERM') => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    const exit = resources.exitFn ?? process.exit;
+    const timeoutMs = resources.timeoutMs ?? 5000;
+    console.log(`[WatcherWorker] Received ${signal}. Shutting down gracefully...`);
+
+    const forceTimer = setTimeout(() => {
+      console.error('[WatcherWorker] Forcefully shutting down after timeout');
+      exit(1);
+    }, timeoutMs);
+    if (typeof forceTimer.unref === 'function') {
+      forceTimer.unref();
+    }
+
+    if (resources.watcherIntervalId !== undefined) {
+      clearInterval(resources.watcherIntervalId);
+    }
+
+    try {
+      if (resources.watcherLifecycle) {
+        await resources.watcherLifecycle.drainAndShutdown(signal);
+      }
+      const prismaClient = resources.prisma ?? prisma;
+      await prismaClient.$disconnect();
+      clearTimeout(forceTimer);
+      console.log('[WatcherWorker] Shutdown complete.');
+      exit(0);
+    } catch (err) {
+      clearTimeout(forceTimer);
+      console.error('[WatcherWorker] Error during shutdown:', err);
+      exit(1);
+    }
+  };
+}
+
 if (require.main === module) {
   registerSupervisorHeartbeat();
   startMemoryMonitor();
   runWatcher();
 
-  // Issue #20: Graceful shutdown for the watcher worker process
+  // Issue #20 / #536: Graceful shutdown for the watcher worker process
   let watcherIntervalId: NodeJS.Timeout | undefined;
 
   // Patch runWatcher to capture the interval handle so we can stop it
@@ -1115,24 +1165,13 @@ if (require.main === module) {
     return id;
   };
 
-  const shutdownWorker = async (signal: string) => {
-    console.log(`[WatcherWorker] Received ${signal}. Shutting down gracefully...`);
+  const shutdown = createWatcherShutdownHandler({
+    watcherLifecycle,
+    prisma,
+    watcherIntervalId,
+    timeoutMs: 5000,
+  });
 
-    if (watcherIntervalId !== undefined) {
-      clearInterval(watcherIntervalId);
-      watcherIntervalId = undefined;
-    }
-
-    try {
-      await prisma.$disconnect();
-      console.log('[WatcherWorker] Shutdown complete.');
-      process.exit(0);
-    } catch (err) {
-      console.error('[WatcherWorker] Error during shutdown:', err);
-      process.exit(1);
-    }
-  };
-
-  process.once('SIGTERM', () => shutdownWorker('SIGTERM'));
-  process.once('SIGINT', () => shutdownWorker('SIGINT'));
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
 }

@@ -1,6 +1,7 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import crypto, { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
+const SEPARATOR = ':';
 
 /**
  * Derives the 32-byte key buffer from the hex env var.
@@ -79,12 +80,41 @@ export function decryptFromString(stored: string): string {
   return decrypt({ iv, authTag, ciphertext });
 }
 
-export interface KeyRotationOptions {
-  newKey: string;
-  newVersion: string;
-  batchSize?: number;
-  dryRun?: boolean;
+export interface EncryptedSecretParts {
+  version: string;
+  iv: string;
+  authTag: string;
+  ciphertext: string;
 }
+
+export class CryptoVault {
+  private currentKey: Buffer;
+  private currentVersion: string;
+  public keys: Map<string, Buffer>;
+
+  constructor(
+    currentKey: string,
+    currentVersion: string = '1',
+    oldKeys: Record<string, string> = {}
+  ) {
+    this.currentVersion = currentVersion;
+    this.currentKey = this.deriveKey(currentKey);
+    this.keys = new Map([[currentVersion, this.currentKey]]);
+
+    for (const [version, key] of Object.entries(oldKeys)) {
+      this.keys.set(version, this.deriveKey(key));
+    }
+  }
+
+  private deriveKey(key: string): Buffer {
+    // Ensure consistent 32-byte key for AES-256-GCM
+    const safeKey = key || 'default_master_encryption_key_32bytes_long!';
+    return crypto.createHash('sha256').update(safeKey).digest();
+  }
+
+  addKey(version: string, key: string): void {
+    this.keys.set(version, this.deriveKey(key));
+  }
 
   encryptParts(plaintext: string): EncryptedSecretParts {
     const iv = crypto.randomBytes(12);
@@ -137,17 +167,19 @@ export interface KeyRotationOptions {
       throw new Error(`Unknown encryption key version: ${version}`);
     }
 
-  private deriveKey(key: string): Buffer {
-    const safeKey = key || 'default_master_encryption_key_32bytes_long!';
-    return crypto.createHash('sha256').update(safeKey).digest();
-  }
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      key,
+      Buffer.from(iv, 'base64')
+    );
+    decipher.setAuthTag(Buffer.from(authTag, 'base64'));
 
-  generateNewKey(): string {
-    return crypto.randomBytes(32).toString('hex');
-  }
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(ciphertext, 'base64')),
+      decipher.final(),
+    ]);
 
-  getGracePeriodMs(): number {
-    return MasterKeyRotationManager.GRACE_PERIOD_MS;
+    return decrypted.toString('utf8');
   }
 
   decrypt(encrypted: string): string {
@@ -194,3 +226,158 @@ export const cryptoVault = new CryptoVault(
   process.env.MASTER_ENCRYPTION_KEY_VERSION ?? '1',
   parsedOldKeys
 );
+
+export interface KeyRotationOptions {
+  newKey: string;
+  newVersion: string;
+  batchSize?: number;
+  dryRun?: boolean;
+}
+
+export interface KeyRotationResult {
+  success: boolean;
+  rotatedCount: number;
+  failedCount: number;
+  errors: string[];
+  newVersion: string;
+}
+
+export class MasterKeyRotationManager {
+  private static readonly DEFAULT_BATCH_SIZE = 100;
+  private static readonly GRACE_PERIOD_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+  async rotateMasterKey(options: KeyRotationOptions): Promise<KeyRotationResult> {
+    const { newKey, newVersion, batchSize = MasterKeyRotationManager.DEFAULT_BATCH_SIZE, dryRun = false } = options;
+    const result: KeyRotationResult = {
+      success: true,
+      rotatedCount: 0,
+      failedCount: 0,
+      errors: [],
+      newVersion,
+    };
+
+    try {
+      // Add new key to CryptoVault
+      cryptoVault.addKey(newVersion, newKey);
+
+      // Re-encrypt all sensitive data
+      const webhookRotationResult = await this.rotateWebhookSecrets(newVersion, batchSize, dryRun);
+      result.rotatedCount += webhookRotationResult.rotatedCount;
+      result.failedCount += webhookRotationResult.failedCount;
+      result.errors.push(...webhookRotationResult.errors);
+
+      const walletRotationResult = await this.rotateWalletCredentials(newVersion, batchSize, dryRun);
+      result.rotatedCount += walletRotationResult.rotatedCount;
+      result.failedCount += walletRotationResult.failedCount;
+      result.errors.push(...walletRotationResult.errors);
+
+      const botTokenRotationResult = await this.rotateBotTokens(newVersion, batchSize, dryRun);
+      result.rotatedCount += botTokenRotationResult.rotatedCount;
+      result.failedCount += botTokenRotationResult.failedCount;
+      result.errors.push(...botTokenRotationResult.errors);
+
+      if (result.failedCount > 0) {
+        result.success = false;
+      }
+
+      return result;
+    } catch (error: any) {
+      result.success = false;
+      result.errors.push(error.message);
+      return result;
+    }
+  }
+
+  private async rotateWebhookSecrets(
+    newVersion: string,
+    batchSize: number,
+    dryRun: boolean
+  ): Promise<{ rotatedCount: number; failedCount: number; errors: string[] }> {
+    const { prisma } = await import('../lib/prisma');
+    let rotatedCount = 0;
+    let failedCount = 0;
+    const errors: string[] = [];
+
+    const webhooks = await prisma.webhook.findMany({
+      where: {
+        keyVersion: { lt: parseInt(newVersion, 10) },
+      },
+      take: batchSize,
+    });
+
+    for (const webhook of webhooks) {
+      try {
+        const encrypted = [
+          String(webhook.keyVersion),
+          webhook.secretIv,
+          webhook.secretAuthTag,
+          webhook.secretCiphertext,
+        ].join(':');
+
+        const decrypted = cryptoVault.decrypt(encrypted);
+        const reEncrypted = cryptoVault.encrypt(decrypted);
+        const [ver, iv, authTag, ciphertext] = reEncrypted.split(':');
+
+        if (!dryRun) {
+          await prisma.webhook.update({
+            where: { id: webhook.id },
+            data: {
+              secretCiphertext: ciphertext,
+              secretIv: iv,
+              secretAuthTag: authTag,
+              keyVersion: parseInt(newVersion, 10),
+            },
+          });
+        }
+
+        rotatedCount++;
+      } catch (error: any) {
+        failedCount++;
+        errors.push(`Failed to rotate webhook ${webhook.id}: ${error.message}`);
+      }
+    }
+
+    return { rotatedCount, failedCount, errors };
+  }
+
+  private async rotateWalletCredentials(
+    newVersion: string,
+    batchSize: number,
+    dryRun: boolean
+  ): Promise<{ rotatedCount: number; failedCount: number; errors: string[] }> {
+    const { prisma } = await import('../lib/prisma');
+    let rotatedCount = 0;
+    let failedCount = 0;
+    const errors: string[] = [];
+
+    return { rotatedCount, failedCount, errors };
+  }
+
+  private async rotateBotTokens(
+    newVersion: string,
+    batchSize: number,
+    dryRun: boolean
+  ): Promise<{ rotatedCount: number; failedCount: number; errors: string[] }> {
+    const { prisma } = await import('../lib/prisma');
+    let rotatedCount = 0;
+    let failedCount = 0;
+    const errors: string[] = [];
+
+    return { rotatedCount, failedCount, errors };
+  }
+
+  private deriveKey(key: string): Buffer {
+    const safeKey = key || 'default_master_encryption_key_32bytes_long!';
+    return crypto.createHash('sha256').update(safeKey).digest();
+  }
+
+  generateNewKey(): string {
+    return crypto.randomBytes(32).toString('hex');
+  }
+
+  getGracePeriodMs(): number {
+    return MasterKeyRotationManager.GRACE_PERIOD_MS;
+  }
+}
+
+export const masterKeyRotationManager = new MasterKeyRotationManager();

@@ -482,6 +482,44 @@ describe('Horizon SSE stream lifecycle', () => {
     close();
   });
 
+  it('resets heartbeat timer on every chunk and reconnects upon silent TCP timeout expiration (#538)', async () => {
+    const { connector, connections } = makeConnector();
+    const close = await startHorizonSSEStream(wallet, {
+      connector,
+      reconnectDelayMs: 10,
+      heartbeatTimeoutMs: 30000,
+    });
+
+    expect(connections).toHaveLength(1);
+    const initialHeartbeatTimeouts = streamMetrics.heartbeatTimeouts;
+    const initialReconnects = streamMetrics.reconnects;
+
+    // Advance 25s (< 30s) — stream remains active, no reconnect
+    await vi.advanceTimersByTimeAsync(25000);
+    expect(connections).toHaveLength(1);
+    expect(connections[0].close).not.toHaveBeenCalled();
+
+    // A chunk/message arrives on the SSE stream; heartbeat timer resets
+    await connections[0].handlers.onmessage(paymentRecord('4201', 'hash-chunk-1'));
+    expect(connections).toHaveLength(1);
+
+    // Advance another 25s (total 50s from start, but 25s since chunk) — still no timeout
+    await vi.advanceTimersByTimeAsync(25000);
+    expect(connections).toHaveLength(1);
+    expect(connections[0].close).not.toHaveBeenCalled();
+
+    // Now advance 30s with silence (simulating silent TCP stream drop)
+    await vi.advanceTimersByTimeAsync(30000);
+
+    // Old stream was closed and reconnect triggered
+    expect(connections[0].close).toHaveBeenCalledTimes(1);
+    expect(connections).toHaveLength(2);
+    expect(streamMetrics.heartbeatTimeouts).toBe(initialHeartbeatTimeouts + 1);
+    expect(streamMetrics.reconnects).toBe(initialReconnects + 1);
+
+    close();
+  });
+
   it('processes messages one at a time and drops beyond the backpressure limit', async () => {
     vi.useRealTimers();
     const { connector, connections } = makeConnector();

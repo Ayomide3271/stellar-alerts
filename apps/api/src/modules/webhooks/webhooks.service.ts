@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { prisma } from '../../lib/prisma';
 import { generateWebhookSignature } from '../../utils/webhook-signer';
 import { encryptToString, decryptFromString } from '../../utils/crypto-vault';
+import { KeyRotationManager } from '../../utils/key-rotation-manager';
 
 export interface WebhookTestResult {
   success: boolean;
