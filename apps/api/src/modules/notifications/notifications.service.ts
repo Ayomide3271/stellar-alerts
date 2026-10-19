@@ -13,6 +13,7 @@ import { isValidE164Number } from '../../utils/whatsapp';
 import { isValidSlackWebhookUrl } from '../../utils/slack';
 import { ValidationError } from '../../lib/errors';
 import { dispatchPushNotification } from '../../utils/push-protocol';
+import { slackNotificationProvider } from './providers/slack.provider';
 
 export function isValidDiscordWebhookUrl(url: string): boolean {
   try {
@@ -292,6 +293,16 @@ export class NotificationsService {
     }
 
     throw new Error(`Unsupported test ping channel: ${channel}`);
+  }
+
+  /**
+   * Dispatch an interactive Slack Block Kit notification (#637).
+   */
+  async dispatchSlackNotification(
+    target: { webhookUrl?: string; botToken?: string; channel?: string },
+    data: Parameters<typeof slackNotificationProvider.buildBlockKitPayload>[0],
+  ) {
+    return slackNotificationProvider.dispatch(target, data);
   }
 }
 

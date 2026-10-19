@@ -28,6 +28,7 @@ import {
 } from './profile-types.js';
 import {
   sealVault,
+  sealArgon2Vault,
   openVault,
   parseVaultFile,
   emptyVaultPayload,
@@ -149,11 +150,15 @@ async function writeVaultPayload(
   configDir: string,
   payload: VaultPayload,
   password: string,
+  kdf: 'argon2id' | 'scrypt' = 'argon2id',
 ): Promise<void> {
   ensureConfigDir(configDir);
   const vaultPath = getVaultFilePath(configDir);
 
-  const vaultFile = await sealVault(payload, password);
+  const vaultFile =
+    kdf === 'argon2id'
+      ? await sealArgon2Vault(payload, password)
+      : await sealVault(payload, password);
 
   try {
     writeFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), {
