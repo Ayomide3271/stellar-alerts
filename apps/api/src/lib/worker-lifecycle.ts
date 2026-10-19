@@ -25,7 +25,7 @@ export class WorkerLifecycleManager {
 
   constructor(options: WorkerLifecycleOptions) {
     this.workerName = options.workerName;
-    this.drainTimeoutMs = options.drainTimeoutMs ?? 10_000;
+    this.drainTimeoutMs = options.drainTimeoutMs ?? 5_000;
     this.maxInFlight = options.maxInFlight ?? 50;
 
     if (options.autoRegisterSignals && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {

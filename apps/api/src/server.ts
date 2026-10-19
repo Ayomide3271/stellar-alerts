@@ -8,7 +8,62 @@ import { createLogger } from './lib/logger';
 
 const log = createLogger({ module: 'ApiServer' });
 
-const start = async () => {
+export interface ServerShutdownResources {
+  app: { close: () => Promise<unknown> };
+  prisma: { $disconnect: () => Promise<unknown> };
+  grpcServer?: { stop: () => void };
+  shutdownTelemetry?: () => Promise<unknown>;
+  closeRedisConnections?: () => Promise<unknown>;
+  exitFn?: (code: number) => void;
+  timeoutMs?: number;
+}
+
+export function createGracefulShutdownHandler(resources: ServerShutdownResources) {
+  let isShuttingDown = false;
+  return async (signal = 'SIGTERM') => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    const exit = resources.exitFn ?? process.exit;
+    const timeoutMs = resources.timeoutMs ?? 5000;
+
+    log.info(`Graceful shutdown initiated (${signal})`);
+    const forceTimer = setTimeout(() => {
+      log.error('Could not close connections in time, forcefully shutting down');
+      exit(1);
+    }, timeoutMs);
+    if (typeof forceTimer.unref === 'function') {
+      forceTimer.unref();
+    }
+
+    try {
+      if (resources.grpcServer) {
+        try {
+          resources.grpcServer.stop();
+        } catch (err) {
+          console.error('Error stopping gRPC server:', err);
+        }
+      }
+
+      await resources.app.close();
+      await resources.prisma.$disconnect();
+      if (resources.shutdownTelemetry) {
+        await resources.shutdownTelemetry();
+      }
+      if (resources.closeRedisConnections) {
+        await resources.closeRedisConnections();
+      }
+      clearTimeout(forceTimer);
+      log.info('✅ Server, Prisma, and Redis closed cleanly');
+      exit(0);
+    } catch (err) {
+      clearTimeout(forceTimer);
+      log.error({ err }, 'Error during graceful shutdown');
+      exit(1);
+    }
+  };
+}
+
+export const start = async () => {
   try {
     await connectWithRetry();
     await startTelemetry();
@@ -38,33 +93,22 @@ const start = async () => {
       setInterval(cleanupExports, env.EXPORT_CLEANUP_INTERVAL_MS).unref();
     }
 
-    const shutdown = async () => {
-      log.info('Graceful shutdown initiated');
-      setTimeout(() => {
-        log.error('Could not close connections in time, forcefully shutting down');
-        process.exit(1);
-      }, 5000);
+    const shutdown = createGracefulShutdownHandler({
+      app,
+      prisma,
+      grpcServer,
+      shutdownTelemetry,
+      closeRedisConnections,
+    });
 
-      try {
-        grpcServer.stop();
-      } catch (err) {
-        console.error('Error stopping gRPC server:', err);
-      }
-      
-      await app.close();
-      await prisma.$disconnect();
-      await shutdownTelemetry();
-      await closeRedisConnections();
-      log.info('✅ Server, Prisma, and Redis closed cleanly');
-      process.exit(0);
-    };
-
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', () => void shutdown('SIGTERM'));
+    process.on('SIGINT', () => void shutdown('SIGINT'));
   } catch (err) {
     log.error({ err }, 'Failed to start server');
     process.exit(1);
   }
 };
 
-start();
+if (require.main === module || (process.env.NODE_ENV !== 'test' && !process.env.VITEST)) {
+  start();
+}
