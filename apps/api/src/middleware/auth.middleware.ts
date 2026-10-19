@@ -36,7 +36,8 @@ export async function authenticateHook(request: FastifyRequest, reply: FastifyRe
   // Check Redis blocklist — reject if token has been explicitly revoked (logout).
   if (decoded.jti) {
     try {
-      const revoked = await isTokenRevoked(decoded.jti);
+  // PR placeholder for issue #532 – JWT session revocation
+    const revoked = await isTokenRevoked(decoded.jti);
       if (revoked) {
         throw new AuthenticationError('Session has been revoked. Please log in again.', 'TOKEN_REVOKED');
       }
