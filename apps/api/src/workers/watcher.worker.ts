@@ -60,17 +60,19 @@ const log = createLogger({ module: 'WatcherWorker' });
  * frozen and killed (see workers/supervisor.ts heartbeat logic).
  */
 function registerSupervisorHeartbeat() {
-  process.on('message', (message: unknown) => {
-    if (isPingMessage(message)) {
-      process.send?.({ type: 'pong' });
-    }
-  });
+  if (process.send) {
+    process.on('message', (message: any) => {
+      if (message === 'ping' || message?.type === 'ping') {
+        process.send?.({ type: 'pong', pid: process.pid });
+      }
+    });
+  }
 }
 
 export async function processPaymentRecord(
   wallet: { id: string; publicKey: string; userId?: string },
   record: HorizonOperationRecord,
-  options: { skipGapCheck?: boolean; previousPagingToken?: string | null } = {}
+  options: { skipGapCheck?: boolean } = {}
 ) {
   return tracer.startActiveSpan('watcher.processPaymentRecord', async (span) => {
     try {
@@ -185,81 +187,94 @@ export async function processPaymentRecord(
         }
       }
 
-      const transactionResult = await prisma.$transaction(async (tx) => {
-        const inserted = await tx.payment.createMany({
-          data: [{
-            walletId: wallet.id,
-            txHash,
-            fromAddress,
-            amount: Number(amount),
-            asset,
-            assetIssuer,
-            memo,
-            receivedAt,
-          }],
-          skipDuplicates: true,
-        });
-        const persistedPayment = await tx.payment.findUnique({ where: { txHash } });
-
-        if (!persistedPayment) {
-          throw new Error(`Payment ${txHash} was not available after its transactional insert`);
-        }
-
-        if (inserted.count > 0) {
-          const eventPayload = {
-            paymentId: persistedPayment.id,
-            txHash,
-            walletId: wallet.id,
-            amount,
-            asset,
-            assetIssuer,
-            fromAddress,
-            receivedAt: receivedAt.toISOString(),
-          };
-          await tx.outboxEvent.createMany({
-            data: [
-              ...(shouldSendAlert
-                ? [{ eventType: 'payment.alert', aggregateId: persistedPayment.id, payload: eventPayload }]
-                : []),
-              { eventType: 'payment.realtime', aggregateId: persistedPayment.id, payload: eventPayload },
-            ],
+      const transactionResult = await withWalletLock(
+        wallet.id,
+        () => prisma.$transaction(async (tx) => {
+          const inserted = await tx.payment.createMany({
+            data: [{
+              walletId: wallet.id,
+              txHash,
+              fromAddress,
+              amount: Number(amount),
+              asset,
+              assetIssuer,
+              memo,
+              receivedAt,
+            }],
+            skipDuplicates: true,
           });
-        }
+          const persistedPayment = await tx.payment.findUnique({ where: { txHash } });
 
-        let cursorGap = { hasGap: false, ledgerDelta: 0 };
-        if (pagingToken) {
-          if (options.skipGapCheck) {
-            await tx.ingestionCursor.upsert({
-              where: { walletId: wallet.id },
-              create: { walletId: wallet.id, pagingToken },
-              update: { pagingToken, ...buildCursorSuccessUpdate() },
-            });
-          } else {
-            const previousPagingToken =
-              options.previousPagingToken !== undefined
-                ? options.previousPagingToken
-                : (await tx.ingestionCursor.findUnique({ where: { walletId: wallet.id } }))?.pagingToken ?? null;
-            cursorGap = detectLedgerGap(previousPagingToken, pagingToken);
+          if (!persistedPayment) {
+            throw new Error(`Payment ${txHash} was not available after its transactional insert`);
+          }
 
-            await tx.ingestionCursor.upsert({
-              where: { walletId: wallet.id },
-              create: { walletId: wallet.id, pagingToken },
-              update: {
-                pagingToken,
-                ...(cursorGap.hasGap
-                  ? buildCursorGapUpdate(cursorGap.ledgerDelta)
-                  : buildCursorSuccessUpdate()),
-              },
+          if (inserted.count > 0) {
+            const eventPayload = {
+              paymentId: persistedPayment.id,
+              txHash,
+              walletId: wallet.id,
+              amount,
+              asset,
+              assetIssuer,
+              fromAddress,
+              receivedAt: receivedAt.toISOString(),
+            };
+            await tx.outboxEvent.createMany({
+              data: [
+                ...(shouldSendAlert
+                  ? [{ eventType: 'payment.alert', aggregateId: persistedPayment.id, payload: eventPayload }]
+                  : []),
+                { eventType: 'payment.realtime', aggregateId: persistedPayment.id, payload: eventPayload },
+              ],
             });
           }
-        }
 
-        return {
-          payment: persistedPayment,
-          isNewPayment: inserted.count > 0,
-          gap: cursorGap,
-        };
-      });
+          let cursorGap = { hasGap: false, ledgerDelta: 0 };
+          if (pagingToken) {
+            if (options.skipGapCheck) {
+              const currentPagingToken =
+                (await tx.ingestionCursor.findUnique({ where: { walletId: wallet.id } }))?.pagingToken ?? null;
+              if (currentPagingToken === null || isPagingTokenAtLeast(pagingToken, currentPagingToken)) {
+                await tx.ingestionCursor.upsert({
+                  where: { walletId: wallet.id },
+                  create: { walletId: wallet.id, pagingToken },
+                  update: { pagingToken, ...buildCursorSuccessUpdate() },
+                });
+              }
+            } else {
+              const previousPagingToken =
+                (await tx.ingestionCursor.findUnique({ where: { walletId: wallet.id } }))?.pagingToken ?? null;
+              const cursorCanAdvance =
+                previousPagingToken === null || isPagingTokenAtLeast(pagingToken, previousPagingToken);
+              cursorGap = detectLedgerGap(previousPagingToken, pagingToken);
+
+              if (cursorCanAdvance) {
+                await tx.ingestionCursor.upsert({
+                  where: { walletId: wallet.id },
+                  create: { walletId: wallet.id, pagingToken },
+                  update: {
+                    pagingToken,
+                    ...(cursorGap.hasGap
+                      ? buildCursorGapUpdate(cursorGap.ledgerDelta)
+                      : buildCursorSuccessUpdate()),
+                  },
+                });
+              }
+            }
+          }
+
+          return {
+            payment: persistedPayment,
+            isNewPayment: inserted.count > 0,
+            gap: cursorGap,
+          };
+        }),
+        { retryCount: 3, retryDelayMs: 100 },
+      );
+      if (transactionResult === null) {
+        throw new Error(`Could not acquire wallet processing lock for ${wallet.id}`);
+      }
       payment = transactionResult.payment;
       isNewPayment = transactionResult.isNewPayment;
       const { gap } = transactionResult;
@@ -404,6 +419,11 @@ export async function processPaymentRecord(
   });
 }
 
+function isPagingTokenAtLeast(candidate: string, current: string): boolean {
+  if (!/^\d+$/.test(candidate) || !/^\d+$/.test(current)) return candidate === current;
+  return BigInt(candidate) >= BigInt(current);
+}
+
 // Number of operations pulled from Horizon per cursor page
 const CURSOR_PAGE_SIZE = 50;
 
@@ -507,14 +527,16 @@ export async function ensureCursor(wallet: {
   if (existing) return existing.pagingToken;
 
   const pagingToken = await stellar.getLatestPagingToken(wallet.publicKey);
-  const created = await prisma.ingestionCursor.create({
-    data: { walletId: wallet.id, pagingToken },
+  const cursor = await prisma.ingestionCursor.upsert({
+    where: { walletId: wallet.id },
+    create: { walletId: wallet.id, pagingToken },
+    update: {},
   });
   log.info(
     { walletPublicKey: wallet.publicKey.substring(0, 8), pagingToken },
-    '🔖 Seeded ingestion cursor'
+    '🔖 Ensured ingestion cursor'
   );
-  return created.pagingToken;
+  return cursor.pagingToken;
 }
 
 export async function processWalletPayments(wallet: { id: string; publicKey: string; userId?: string }) {
@@ -565,7 +587,7 @@ export async function processWalletPayments(wallet: { id: string; publicKey: str
         }
 
         for (const record of records) {
-          await processPaymentRecord(wallet, record, { previousPagingToken: cursor });
+          await processPaymentRecord(wallet, record);
           const token = getHorizonPagingToken(record);
           if (token) {
             cursor = token;
@@ -648,17 +670,27 @@ export async function startHorizonSSEStream(
     // up. Once maxQueuedMessages are waiting behind the in-flight one, further
     // messages are dropped (and counted) rather than buffered without limit.
     let queueLength = 0;
+    let streamGeneration = 0;
     let processingChain: Promise<void> = Promise.resolve();
-    const enqueueMessage = (task: () => Promise<void>): Promise<void> => {
+    const enqueueMessage = (task: () => Promise<void>, generation: number): Promise<void> => {
       if (queueLength >= maxQueuedMessages) {
         streamMetrics.backpressureDropped++;
         log.warn(`[WatcherStream] ⚠️ Backpressure limit reached (${maxQueuedMessages}); dropping message for ${wallet.publicKey.substring(0, 8)}...`);
+        if (generation === streamGeneration && !isClosed) {
+          restartFromPersistedCursor(generation);
+        }
         return Promise.resolve();
       }
       queueLength++;
       const run = processingChain
-        .then(task)
-        .catch((err) => log.error(`[WatcherStream] Error processing queued message: ${err.message}`))
+        .then(async () => {
+          if (generation === streamGeneration) await task();
+        })
+        .catch((err: unknown) => {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log.error(`[WatcherStream] Error processing queued message: ${errMsg}`);
+          restartFromPersistedCursor(generation);
+        })
         .finally(() => {
           queueLength--;
         });
@@ -667,11 +699,11 @@ export async function startHorizonSSEStream(
     };
 
     const defaultConnector: StreamConnector = (cursor, handlers) => {
-      return stellar.server
-        .payments()
-        .forAccount(wallet.publicKey)
-        .cursor(cursor)
-        .stream(handlers) as unknown as () => void;
+      return stellar.multiNode.streamPaymentsMultiNode(
+        wallet.publicKey,
+        cursor,
+        (record) => handlers.onmessage(record),
+      );
     };
 
     const connector = options.connector ?? defaultConnector;
@@ -693,6 +725,15 @@ export async function startHorizonSSEStream(
       }
     };
 
+    const restartFromPersistedCursor = (generation: number) => {
+      if (isClosed || generation !== streamGeneration) return;
+      streamGeneration++;
+      cleanupCurrent();
+      reconnectTimeout = setTimeout(() => {
+        void connect();
+      }, reconnectDelay);
+    };
+
     const resetHeartbeat = () => {
       if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
       heartbeatTimeout = setTimeout(() => {
@@ -708,8 +749,8 @@ export async function startHorizonSSEStream(
 
       try {
         const cursor = await ensureCursor(wallet);
-        let lastPagingToken: string | null = cursor;
         resetHeartbeat();
+        const connectionGeneration = streamGeneration;
 
         const handlers: StreamHandlerOptions = {
           onmessage: async (record: HorizonOperationRecord) => {
@@ -717,13 +758,9 @@ export async function startHorizonSSEStream(
             attempts = 1;
             console.log(`[WatcherStream] ⚡ Live SSE stream message received: ${record.type}`);
             await enqueueMessage(async () => {
-              await processPaymentRecord(wallet, record, { previousPagingToken: lastPagingToken });
-              const token = getHorizonPagingToken(record);
-              if (token) {
-                lastPagingToken = token;
-              }
+              await processPaymentRecord(wallet, record);
               streamMetrics.messagesProcessed++;
-            });
+            }, connectionGeneration);
           },
           onerror: (error: Error | unknown) => {
             const errMsg = error instanceof Error ? error.message : String(error);
@@ -745,6 +782,14 @@ export async function startHorizonSSEStream(
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[WatcherStream] Failed to open SSE stream: ${errMsg}`);
+        if (!isClosed && attempts < maxAttempts) {
+          const delay = Math.min(reconnectDelay * 2 ** (attempts - 1), maxReconnectDelay);
+          attempts++;
+          streamMetrics.reconnects++;
+          reconnectTimeout = setTimeout(() => {
+            void connect();
+          }, delay);
+        }
       }
     };
 
@@ -860,6 +905,7 @@ export async function pollOnce() {
 
 export async function runWatcher() {
   log.info("[WatcherWorker] 🚀 Starting Stellar Testnet Watcher Worker...");
+  const walletStreams = new Map<string, () => void>();
 
   // Without an SDK registered the OpenTelemetry API is a no-op, so webhook
   // dispatch spans would be silently dropped instead of reaching Jaeger.
@@ -879,6 +925,10 @@ export async function runWatcher() {
   watcherLifecycle.registerCleanup('memoryMonitor', () => {
     memoryMonitor?.stop();
   });
+  watcherLifecycle.registerCleanup('horizonStreams', () => {
+    for (const close of walletStreams.values()) close();
+    walletStreams.clear();
+  });
   watcherLifecycle.registerCleanup('prisma', async () => {
     await prisma.$disconnect();
   });
@@ -890,6 +940,13 @@ export async function runWatcher() {
       return tracer.startActiveSpan('watcher.poll', async (pollSpan) => {
         try {
           const wallets = await prisma.wallet.findMany();
+          const activeWalletIds = new Set(wallets.map((wallet) => wallet.id));
+          for (const [walletId, close] of walletStreams) {
+            if (!activeWalletIds.has(walletId)) {
+              close();
+              walletStreams.delete(walletId);
+            }
+          }
           if (wallets.length === 0) {
             log.info(
               "[WatcherWorker] No wallets registered in DB to watch. Waiting for next poll...",
@@ -904,6 +961,16 @@ export async function runWatcher() {
           );
           for (const wallet of wallets) {
             await processWalletPayments({ id: wallet.id, publicKey: wallet.publicKey, userId: wallet.userId });
+            if (!walletStreams.has(wallet.id)) {
+              walletStreams.set(
+                wallet.id,
+                await startHorizonSSEStream({
+                  id: wallet.id,
+                  publicKey: wallet.publicKey,
+                  userId: wallet.userId,
+                }),
+              );
+            }
           }
 
           const contractIds = getActiveContractIds();

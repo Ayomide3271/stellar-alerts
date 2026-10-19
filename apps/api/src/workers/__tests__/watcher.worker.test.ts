@@ -39,6 +39,7 @@ vi.mock('../../lib/stellar', async (importOriginal) => {
     })),
     stellar: {
       server: {},
+      multiNode: { streamPaymentsMultiNode: vi.fn(() => vi.fn()) },
       getRecentPayments: vi.fn().mockResolvedValue([]),
       getPaymentsSince: vi.fn(),
       getPaymentsSinceResult: vi.fn(),
@@ -66,6 +67,7 @@ vi.mock('../../services/checksumChain.service', () => ({
 
 import { prisma } from '../../lib/prisma';
 import { stellar } from '../../lib/stellar';
+import { withWalletLock } from '../../lib/lock';
 import { enqueuePaymentAlert } from '../../lib/queue';
 import {
   ensureCursor,
@@ -112,12 +114,14 @@ describe('Watcher ingestion cursor', () => {
     it('creates a cursor record seeded from the latest paging token on first sight', async () => {
       vi.mocked(prisma.ingestionCursor.findUnique).mockResolvedValue(null as any);
       vi.mocked(stellar.getLatestPagingToken).mockResolvedValue('4000');
-      vi.mocked(prisma.ingestionCursor.create).mockResolvedValue({ pagingToken: '4000' } as any);
+      vi.mocked(prisma.ingestionCursor.upsert).mockResolvedValue({ pagingToken: '4000' } as any);
 
       const cursor = await ensureCursor(wallet);
 
-      expect(prisma.ingestionCursor.create).toHaveBeenCalledWith({
-        data: { walletId: wallet.id, pagingToken: '4000' },
+      expect(prisma.ingestionCursor.upsert).toHaveBeenCalledWith({
+        where: { walletId: wallet.id },
+        create: { walletId: wallet.id, pagingToken: '4000' },
+        update: {},
       });
       expect(cursor).toBe('4000');
     });
@@ -191,6 +195,11 @@ describe('Watcher ingestion cursor', () => {
       });
       expect(prisma.ingestionCursor.upsert).toHaveBeenCalledWith(
         expect.objectContaining({ update: expect.objectContaining({ pagingToken: toid(1001) }) }),
+      );
+      expect(withWalletLock).toHaveBeenCalledWith(
+        wallet.id,
+        expect.any(Function),
+        { retryCount: 3, retryDelayMs: 100 },
       );
     });
 
@@ -342,6 +351,21 @@ describe('Horizon SSE stream lifecycle', () => {
     );
 
     close();
+  });
+
+  it('uses the multi-node Horizon cluster for its default connector', async () => {
+    const closeStream = vi.fn();
+    vi.mocked(stellar.multiNode.streamPaymentsMultiNode).mockReturnValue(closeStream);
+
+    const close = await startHorizonSSEStream(wallet);
+
+    expect(stellar.multiNode.streamPaymentsMultiNode).toHaveBeenCalledWith(
+      wallet.publicKey,
+      '4200',
+      expect.any(Function),
+    );
+    close();
+    expect(closeStream).toHaveBeenCalledTimes(1);
   });
 
   it('automatically reconnects after a network drop', async () => {
@@ -639,4 +663,3 @@ describe('processPaymentRecord — persisted AlertRule evaluator', () => {
     });
   });
 });
-

@@ -314,6 +314,8 @@ export const DEFAULT_HORIZON_ENDPOINTS = [
   ...stellarNetwork.horizonEndpoints,
 ];
 
+const STREAM_QUORUM_FALLBACK_MS = 1000;
+
 export class MultiNodeHorizonClient {
   public endpoints: string[];
   public servers: StellarSdk.Horizon.Server[];
@@ -377,15 +379,56 @@ export class MultiNodeHorizonClient {
     onMessage: (record: HorizonOperationRecord, nodeUrl: string) => Promise<void> | void,
     onError?: (error: unknown, nodeUrl: string) => void,
   ): () => void {
-    const seenPagingTokens = new Set<string>();
+    const pendingVotes = new Map<string, {
+      record: HorizonOperationRecord;
+      nodeUrl: string;
+      nodeIndexes: Set<number>;
+      timeout: NodeJS.Timeout;
+    }>();
+    const emittedPagingTokens = new Set<string>();
     const activeCloseFns: Array<() => void> = [];
+    const reconnectTimers = new Set<NodeJS.Timeout>();
+    const quorumSize = Math.floor(this.servers.length / 2) + 1;
+    let isClosed = false;
+
+    const emit = async (token: string) => {
+      const vote = pendingVotes.get(token);
+      if (!vote || emittedPagingTokens.has(token) || isClosed) return;
+
+      clearTimeout(vote.timeout);
+      pendingVotes.delete(token);
+      emittedPagingTokens.add(token);
+      if (emittedPagingTokens.size > 10000) {
+        const oldest = emittedPagingTokens.values().next().value;
+        if (oldest) emittedPagingTokens.delete(oldest);
+      }
+
+      try {
+        await onMessage(vote.record, vote.nodeUrl);
+      } catch (error: unknown) {
+        if (onError) onError(error, vote.nodeUrl);
+        else console.error(`[MultiNodeHorizon] Failed to process stream event from ${vote.nodeUrl}:`, error);
+      }
+    };
 
     this.servers.forEach((s, index) => {
-      let isClosed = false;
+      let isNodeClosed = false;
+      let reconnectTimer: NodeJS.Timeout | null = null;
       const nodeUrl = this.endpoints[index] || s.serverURL.toString();
 
+      const scheduleReconnect = () => {
+        if (isClosed || isNodeClosed || reconnectTimer) return;
+        const timer = setTimeout(() => {
+          reconnectTimers.delete(timer);
+          reconnectTimer = null;
+          connect();
+        }, 5000);
+        reconnectTimer = timer;
+        reconnectTimers.add(timer);
+      };
+
       const connect = () => {
-        if (isClosed) return;
+        if (isClosed || isNodeClosed) return;
         try {
           const closeStream = s
             .payments()
@@ -394,37 +437,39 @@ export class MultiNodeHorizonClient {
             .stream({
               onmessage: async (record: unknown) => {
                 const typedRecord = isHorizonOperationRecord(record) ? record : null;
-                const token = typedRecord?.paging_token || (typeof record === 'object' && record && 'id' in record ? String((record as Record<string, unknown>).id ?? '') : '') || (typeof record === 'object' && record && 'transaction_hash' in record ? String((record as Record<string, unknown>).transaction_hash ?? '') : '');
-                if (token && seenPagingTokens.has(token)) {
-                  return; // Deduplicate across concurrent multi-node SSE streams
+                if (!typedRecord) return;
+
+                const token = typedRecord.paging_token || typedRecord.transaction_hash;
+                if (!token || emittedPagingTokens.has(token)) return;
+
+                let vote = pendingVotes.get(token);
+                if (!vote) {
+                  vote = {
+                    record: typedRecord,
+                    nodeUrl,
+                    nodeIndexes: new Set<number>(),
+                    timeout: setTimeout(() => void emit(token), STREAM_QUORUM_FALLBACK_MS),
+                  };
+                  pendingVotes.set(token, vote);
                 }
-                if (token) {
-                  seenPagingTokens.add(token);
-                  if (seenPagingTokens.size > 10000) {
-                    const first = seenPagingTokens.values().next().value;
-                    if (first) seenPagingTokens.delete(first);
-                  }
-                }
-                if (!typedRecord) {
-                  return;
-                }
-                await onMessage(typedRecord, nodeUrl);
+                vote.nodeIndexes.add(index);
+                if (vote.nodeIndexes.size >= quorumSize) await emit(token);
               },
               onerror: (error: unknown) => {
                 if (onError) onError(error, nodeUrl);
-                // Reconnect failover worker connection for this specific node
-                setTimeout(() => {
-                  if (!isClosed) connect();
-                }, 5000);
+                else console.warn(`[MultiNodeHorizon] Stream node ${nodeUrl} failed:`, error);
+                scheduleReconnect();
               },
             }) as unknown as () => void;
 
           activeCloseFns.push(() => {
-            isClosed = true;
+            isNodeClosed = true;
             if (closeStream) closeStream();
           });
         } catch (err: unknown) {
           if (onError) onError(err, nodeUrl);
+          else console.warn(`[MultiNodeHorizon] Could not open stream to ${nodeUrl}:`, err);
+          scheduleReconnect();
         }
       };
 
@@ -432,6 +477,11 @@ export class MultiNodeHorizonClient {
     });
 
     return () => {
+      isClosed = true;
+      for (const vote of pendingVotes.values()) clearTimeout(vote.timeout);
+      pendingVotes.clear();
+      for (const timer of reconnectTimers) clearTimeout(timer);
+      reconnectTimers.clear();
       activeCloseFns.forEach((fn) => fn());
     };
   }
