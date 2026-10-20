@@ -5,7 +5,7 @@
  * Each method represents a single RPC round-trip.
  */
 
-import { WalletDTO } from '@stellar-alerts/shared';
+import { WalletDTO, walletDTOSchema } from '@stellar-alerts/shared';
 import { ApiAdapter } from './api.adapter';
 
 export interface GetWalletsResponse {
@@ -16,14 +16,14 @@ export interface GetWalletsResponse {
 export class WalletAdapter extends ApiAdapter {
   async getWallets(): Promise<WalletDTO[]> {
     const response = await this.get<GetWalletsResponse>('/wallets');
-    return response.wallets;
+    return walletDTOSchema.array().parse(response.wallets);
   }
 
   async getWallet(walletId: string): Promise<WalletDTO> {
     const response = await this.get<{ success: boolean; wallet: WalletDTO }>(
       `/wallets/${walletId}`
     );
-    return response.wallet;
+    return walletDTOSchema.parse(response.wallet);
   }
 
   async createWallet(data: {
@@ -34,7 +34,7 @@ export class WalletAdapter extends ApiAdapter {
       '/wallets',
       data
     );
-    return response.wallet;
+    return walletDTOSchema.parse(response.wallet);
   }
 
   async deleteWallet(walletId: string): Promise<void> {

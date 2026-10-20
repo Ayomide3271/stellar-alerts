@@ -1,4 +1,5 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
+import type { WalletDTO } from '@stellar-alerts/shared';
 import {
   createWalletSchema,
   deleteWalletSchema,
@@ -52,7 +53,8 @@ export class WalletsController {
         parsed.data.cursor,
         parsed.data.tag
       );
-      return reply.send({ success: true, wallets: result.items, pagination: result.pagination });
+      const wallets: WalletDTO[] = result.items;
+      return reply.send({ success: true, wallets, pagination: result.pagination });
     } catch (err) {
       if (err instanceof CursorError) {
         return reply.status(400).send({ error: 'Invalid cursor', message: (err as Error).message });
