@@ -7,7 +7,7 @@ import { registerRedisCleanupTask, redisCache } from './redis';
 import { cryptoVault } from '../utils/crypto-vault';
 import { applyWebhookPayloadTemplate } from '../utils/payload-template';
 import { adaptiveWebhookRateLimiter, waitForAdaptiveBackoff } from '../utils/rate-limiter';
-import { generateWebhookSignature } from '../utils/webhook-signer';
+import { buildWebhookSignatureHeaders } from '../utils/webhook-signer';
 import { dispatchWhatsAppAlert, WhatsAppInvalidNumberError } from '../utils/whatsapp';
 import { prisma } from './prisma';
 import { createLogger } from './logger';
@@ -18,6 +18,7 @@ import { persistDeadLetter } from './dead-letter';
 import { ssrfSafeFetch, validateUrlForSsrf } from '../utils/ssrf';
 import { decryptPersonalField } from '../utils/privacy';
 import { emailService } from '../services/email.service';
+import { buildTelegramPaymentCard, dispatchTelegramAlert } from '../utils/telegram-dispatcher';
 import { dispatchDiscordAlert } from '../utils/discord';
 import { dispatchSlackAlert, isValidSlackWebhookUrl } from '../utils/slack';
 import { dispatchPushNotification, PushNotificationData } from '../utils/push-protocol';
@@ -97,18 +98,7 @@ async function loadCircuitBreakerStateFromRedis(webhookId: string): Promise<Circ
   }
 }
 
-export function buildTelegramPaymentCard(data: AlertJobData): string {
-  const escapeHtml = (value: string) => value.replace(/[&<>\"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char] ?? char);
-  return [
-    '<b>Stellar Payment Received</b>',
-    `<b>Amount:</b> ${escapeHtml(data.amount)} ${escapeHtml(data.asset)}`,
-    `<b>From:</b> <code>${escapeHtml(data.fromAddress)}</code>`,
-    `<b>Transaction:</b> <code>${escapeHtml(data.txHash)}</code>`,
-    `<b>Received:</b> ${escapeHtml(data.receivedAt)}`,
-  ].join('\n');
-}
+export { buildTelegramPaymentCard };
 
 function isPublicChannel(chatId: string): boolean {
   return chatId.startsWith('@') || chatId.startsWith('-100');
@@ -362,13 +352,13 @@ export async function dispatchWebhookAndLog(
 
     const payloadString = templateResult.body;
     const webhookSecret = decryptWebhookSecret(webhook);
-    const signature = generateWebhookSignature(payloadString, webhookSecret);
+    const signatureHeaders = buildWebhookSignatureHeaders(payloadString, webhookSecret);
 
     const breaker = await getOrCreateCircuitBreaker(webhookId);
     const dispatchMeta: WebhookDispatchMeta = { webhookId, traceparent };
     const response = await breaker.fire(webhook.url, payloadString, {
       "Content-Type": "application/json",
-      "X-Stellar-Signature": signature.headerValue,
+      ...signatureHeaders,
     }, dispatchMeta);
 
     const responseBody = await response.text();
@@ -752,21 +742,7 @@ export async function processAlertDispatch(data: AlertJobData) {
     if (wallet?.user?.notifyPrefs?.telegramEnabled && wallet.user.notifyPrefs.telegramChatId) {
       const rawChatId = wallet.user.notifyPrefs.telegramChatId;
       const chatId = decryptPersonalField(rawChatId) || rawChatId;
-      await fetchWithTimeout(
-        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: buildTelegramPaymentCard(data),
-            parse_mode: 'HTML',
-          }),
-        },
-        env.NOTIFICATION_PROVIDER_TIMEOUT_MS,
-        undefined,
-        'Telegram',
-      ).catch((err: any) => {
+      await dispatchTelegramAlert(chatId, data).catch((err: any) => {
         queueLog.warn(`[Worker] Telegram dispatch error: ${err.message}`);
       });
     }

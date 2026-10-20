@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as StellarSdk from 'stellar-sdk';
 import { WalletsController } from '../wallets.controller';
 import { walletsService } from '../wallets.service';
 import { ConflictError, NotFoundError, ValidationError } from '../../../lib/errors';
@@ -76,6 +77,19 @@ describe('WalletsController', () => {
       expect(error).toBeInstanceOf(ValidationError);
       expect(error.statusCode).toBe(400);
       expect(error.message).toBe('Invalid payload');
+    });
+
+    it('rejects a well-formed public key with a bad CRC16 checksum before any DB write', async () => {
+      const valid = StellarSdk.Keypair.random().publicKey();
+      const corrupted = valid.slice(0, -1) + (valid.at(-1) === 'A' ? 'B' : 'A');
+      expect(StellarSdk.StrKey.isValidEd25519PublicKey(corrupted)).toBe(false);
+      mockRequest = { user: { id: 'u-1' }, body: { publicKey: corrupted } };
+
+      const error = await walletsController.addWallet(mockRequest, mockReply).catch((e) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect(error.statusCode).toBe(400);
+      expect(walletsService.addWallet).not.toHaveBeenCalled();
     });
   });
 
