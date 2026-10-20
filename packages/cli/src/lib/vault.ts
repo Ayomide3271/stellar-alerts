@@ -24,9 +24,19 @@ import {
   VaultFile,
   VaultPayload,
   ScryptParams,
+  Argon2idParams,
   DEFAULT_SCRYPT_PARAMS,
+  DEFAULT_ARGON2ID_PARAMS,
   ProfileError,
 } from './profile-types.js';
+import {
+  sealArgon2Vault,
+  openArgon2Vault,
+  deriveArgon2idKey,
+  validateArgon2idParams,
+} from './vault/argon2-vault.js';
+
+export { sealArgon2Vault, openArgon2Vault, deriveArgon2idKey, validateArgon2idParams };
 
 const scryptAsync = promisify<
   Buffer | string,
@@ -194,10 +204,14 @@ export async function openVault(
     );
   }
 
+  if (vaultFile.kdf === 'argon2id') {
+    return openArgon2Vault(vaultFile, password);
+  }
+
   if (vaultFile.kdf !== 'scrypt') {
     throw new ProfileError(
       'VAULT_INVALID_METADATA',
-      `Unsupported KDF algorithm: '${vaultFile.kdf}'. Only 'scrypt' is supported.`,
+      `Unsupported KDF algorithm: '${vaultFile.kdf}'. Only 'argon2id' and 'scrypt' are supported.`,
     );
   }
 

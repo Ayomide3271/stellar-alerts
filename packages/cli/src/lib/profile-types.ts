@@ -114,6 +114,24 @@ export const DEFAULT_SCRYPT_PARAMS: ScryptParams = {
 };
 
 /**
+ * Argon2id KDF parameters (RFC 9106 recommended profile).
+ * Memory-hard derivation (64MB memory cost, 3 iterations, 1 lane, 256-bit key).
+ */
+export interface Argon2idParams {
+  memoryCost: number; // in KB, e.g. 65536 = 64MB
+  timeCost: number;   // iterations, e.g. 3
+  parallelism: number; // lanes/threads, default 1
+  keyLen: number;     // 32 bytes for AES-256
+}
+
+export const DEFAULT_ARGON2ID_PARAMS: Argon2idParams = {
+  memoryCost: 65536, // 64 MB
+  timeCost: 3,       // 3 iterations
+  parallelism: 1,
+  keyLen: 32,        // 256 bits
+};
+
+/**
  * The serialized vault format written to disk.
  * All binary values are stored as hex strings for JSON safety.
  */
@@ -122,10 +140,10 @@ export interface VaultFile {
   version: 1;
 
   /** KDF algorithm identifier */
-  kdf: 'scrypt';
+  kdf: 'scrypt' | 'argon2id';
 
-  /** scrypt parameters used to derive the encryption key */
-  kdfParams: ScryptParams;
+  /** KDF parameters used to derive the encryption key */
+  kdfParams: ScryptParams | Argon2idParams;
 
   /** Hex-encoded cryptographically random salt (32 bytes) for scrypt */
   salt: string;

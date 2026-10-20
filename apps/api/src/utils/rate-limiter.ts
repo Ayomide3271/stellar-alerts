@@ -70,6 +70,40 @@ export function getRateLimitDomain(url: string): string {
   } catch {
     return url.toLowerCase();
   }
+}
+
+export class AdaptiveWebhookRateLimiter {
+  private readonly pausedUntilByDomain = new Map<string, number>();
+
+  getDelayMs(url: string, nowMs = Date.now()): number {
+    const pausedUntil = this.pausedUntilByDomain.get(getRateLimitDomain(url));
+    if (!pausedUntil) return 0;
+
+    const delayMs = pausedUntil - nowMs;
+    if (delayMs <= 0) {
+      this.pausedUntilByDomain.delete(getRateLimitDomain(url));
+      return 0;
+    }
+
+    return delayMs;
+  }
+
+  recordRateLimit(url: string, headers: HeaderReader | undefined, nowMs = Date.now()): number {
+    const delayMs = getAdaptiveBackoffMs(headers, nowMs);
+    this.pausedUntilByDomain.set(getRateLimitDomain(url), nowMs + delayMs);
+    return delayMs;
+  }
+
+  clear(url: string): void {
+    this.pausedUntilByDomain.delete(getRateLimitDomain(url));
+  }
+}
+
+export const adaptiveWebhookRateLimiter = new AdaptiveWebhookRateLimiter();
+export const waitForAdaptiveBackoff = (delayMs: number) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+export class AdaptiveRateLimiter {
+  private blockedUntil = new Map<string, number>();
 
   /**
    * Parse a 429 response's headers to determine how long to back off.

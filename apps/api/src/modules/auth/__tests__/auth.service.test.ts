@@ -12,8 +12,7 @@ const mockRedis = vi.hoisted(() => ({
     return mockRedisStore.get(key) ?? null;
   }),
   del: vi.fn(async (key: string) => {
-    mockRedisStore.delete(key);
-    return 1;
+    return mockRedisStore.delete(key) ? 1 : 0;
   }),
 }));
 
@@ -73,6 +72,42 @@ describe('AuthService', () => {
       });
       expect(result.user).toEqual({ id: mockUser.id, email: mockUser.email });
       expect(typeof result.token).toBe('string');
+    });
+
+    it('rejects a second verification of the same magic token (single use)', async () => {
+      const email = 'replay@stellar-alerts.org';
+      const magicToken = await authService.requestMagicLink(email);
+      (prisma.user.upsert as any).mockResolvedValue({ id: 'u1', email });
+
+      await expect(authService.verifyMagicLink(magicToken)).resolves.toBeDefined();
+      await expect(authService.verifyMagicLink(magicToken)).rejects.toThrow('Invalid or expired token');
+      expect(prisma.user.upsert).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows only one of two concurrent verifications to succeed', async () => {
+      const email = 'race@stellar-alerts.org';
+      const magicToken = await authService.requestMagicLink(email);
+      (prisma.user.upsert as any).mockResolvedValue({ id: 'u2', email });
+
+      const results = await Promise.allSettled([
+        authService.verifyMagicLink(magicToken),
+        authService.verifyMagicLink(magicToken),
+      ]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    });
+
+    it('fails closed in production when Redis cannot confirm token consumption', async () => {
+      const magicToken = await authService.requestMagicLink('down@stellar-alerts.org');
+      mockRedis.del.mockRejectedValueOnce(new Error('redis down'));
+      vi.stubEnv('NODE_ENV', 'production');
+
+      try {
+        await expect(authService.verifyMagicLink(magicToken)).rejects.toThrow('Invalid or expired token');
+        expect(prisma.user.upsert).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it('should throw error for an invalid magic token', async () => {

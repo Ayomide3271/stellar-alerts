@@ -99,22 +99,27 @@ export class AuthService {
       throw new Error('Invalid or expired token');
     }
 
+    // Atomically consume the jti: DEL returns 1 only for the single caller that
+    // actually removed the key, so concurrent or replayed verifications of the
+    // same link are rejected. If Redis cannot confirm consumption we fail closed
+    // everywhere except local test/dev, where Redis is commonly not running.
     const redisKey = `magic_token:${decoded.jti}`;
-    let tokenStatus: string | null = 'valid';
+    let consumed: number | null = 0;
     try {
-      tokenStatus = await redis.get(redisKey);
-    } catch {
-      // Redis offline: proceed with verification in test/dev
+      consumed = await redis.del(redisKey);
+    } catch (err: any) {
+      const allowOffline = process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development';
+      if (!allowOffline) {
+        console.error('[AuthService] Unable to consume magic token jti:', err?.message);
+        throw new Error('Invalid or expired token');
+      }
+      consumed = null; // Redis offline in test/dev: skip single-use enforcement
     }
 
-    if (!tokenStatus) {
+    if (consumed !== null && consumed !== 1) {
       console.error('[AuthService] Token already used or expired (jti not found in Redis):', decoded.jti);
       throw new Error('Invalid or expired token');
     }
-
-    try {
-      await redis.del(redisKey);
-    } catch {}
 
     try {
       const user = await prisma.user.upsert({

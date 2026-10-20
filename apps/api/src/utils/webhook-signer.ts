@@ -716,3 +716,25 @@ export function verifyWebhookSignatureSync(
     return false;
   }
 }
+
+export const STELLAR_SIGNATURE_HEADER = 'X-Stellar-Signature';
+export const STELLAR_ALERTS_SIGNATURE_HEADER = 'X-Stellar-Alerts-Signature';
+
+/**
+ * Builds the outgoing signature headers for a webhook payload. The HMAC SHA256
+ * header value is published as `X-Stellar-Alerts-Signature`; the legacy
+ * `X-Stellar-Signature` header carries the identical value so existing
+ * receivers keep working.
+ */
+export function buildWebhookSignatureHeaders(
+  payload: string,
+  secret: string,
+  timestamp: number = Date.now(),
+  nonce: string = generateNonce()
+): Record<string, string> {
+  const { headerValue } = generateWebhookSignature(payload, secret, timestamp, nonce);
+  return {
+    [STELLAR_ALERTS_SIGNATURE_HEADER]: headerValue,
+    [STELLAR_SIGNATURE_HEADER]: headerValue,
+  };
+}

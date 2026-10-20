@@ -28,8 +28,11 @@ import { slackRoutes } from './modules/slack/slack.routes';
 import { graphqlRoutes } from './modules/graphql/graphql.routes';
 import { exportsRoutes } from './modules/exports/exports.routes';
 import { simulationRoutes } from './modules/simulation/simulation.routes';
+import { adminRoutes } from './modules/admin/admin.routes';
 import { openApiOptions } from './openapi.config';
 import { loggerOptions } from './lib/logger';
+import { env } from './config/env';
+import metricsPlugin from './plugins/metrics';
 
 import { checkRedisReadiness, getRedisStatus } from './lib/redis';
 import { dbFailover } from './lib/db-failover';
@@ -109,7 +112,8 @@ export const buildApp = async () => {
     // Redis ping via BullMQ queue's underlying ioredis client
     try {
       if (alertQueue && alertQueue.client) {
-        await alertQueue.client.ping();
+        const redisClient = await alertQueue.client;
+        await (redisClient as any).ping();
         checks.redis = 'ok';
       }
     } catch {
@@ -144,6 +148,7 @@ await app.register(graphqlRoutes);
   app.register(exportsRoutes);
   app.register(simulationRoutes);
   app.register(discordInteractionsRoutes);
+  app.register(adminRoutes);
 
   return app;
 };
