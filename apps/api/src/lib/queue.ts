@@ -482,13 +482,13 @@ export const paymentAlertWorkerProcessor = async (job: { data: AlertJobData }) =
 };
 
 export function createRedisConnectionConfig() {
-  const sentinelsRaw = process.env.REDIS_SENTINELS;
-  const masterName = process.env.REDIS_SENTINEL_MASTER_NAME || "mymaster";
-  const sentinelPassword = process.env.REDIS_SENTINEL_PASSWORD;
-  const redisPassword = process.env.REDIS_PASSWORD;
+  const sentinelsRaw = process.env.REDIS_SENTINEL_ADDRESSES || process.env.REDIS_SENTINELS || (env as any).REDIS_SENTINEL_ADDRESSES || (env as any).REDIS_SENTINELS;
+  const masterName = process.env.REDIS_SENTINEL_MASTER_NAME || (env as any).REDIS_SENTINEL_MASTER_NAME || "mymaster";
+  const sentinelPassword = process.env.REDIS_SENTINEL_PASSWORD || (env as any).REDIS_SENTINEL_PASSWORD;
+  const redisPassword = process.env.REDIS_PASSWORD || (env as any).REDIS_PASSWORD;
 
   if (sentinelsRaw) {
-    const sentinels = sentinelsRaw.split(',').map((s) => {
+    const sentinels = sentinelsRaw.split(',').map((s: string) => {
       const parts = s.trim().split(':');
       return { host: parts[0] || 'localhost', port: parseInt(parts[1] || '26379', 10) };
     });

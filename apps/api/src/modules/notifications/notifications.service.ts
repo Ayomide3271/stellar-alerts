@@ -14,6 +14,7 @@ import { isValidSlackWebhookUrl } from '../../utils/slack';
 import { ValidationError } from '../../lib/errors';
 import { dispatchPushNotification } from '../../utils/push-protocol';
 import { slackNotificationProvider } from './providers/slack.provider';
+import { logger } from '../../lib/logger';
 
 export function isValidDiscordWebhookUrl(url: string): boolean {
   try {
@@ -44,6 +45,7 @@ export interface NotificationPreferences {
   assetFilters?: string[];
   minAmount?: number | string | null;
   receiptPreference?: 'instant' | 'daily_digest' | 'summary' | string;
+  digestFrequency?: 'daily' | 'weekly' | 'off' | string;
   language?: string;
   filterRules?: any;
 }
@@ -124,6 +126,18 @@ export class NotificationsService {
       }
     }
 
+    // Validate digest frequency
+    if (preferences.digestFrequency !== undefined && preferences.digestFrequency !== null) {
+      const allowedFrequencies = ['daily', 'weekly', 'off'];
+      if (!allowedFrequencies.includes(preferences.digestFrequency)) {
+        throw new ValidationError(
+          `Invalid digest frequency. Allowed values: ${allowedFrequencies.join(', ')}`,
+          undefined,
+          'INVALID_DIGEST_FREQUENCY'
+        );
+      }
+    }
+
     // Validate min amount
     if (preferences.minAmount !== undefined && preferences.minAmount !== null) {
       const num = Number(preferences.minAmount);
@@ -161,6 +175,7 @@ export class NotificationsService {
       pushChannelAddress: preferences.pushChannelAddress,
       pushEnabled: preferences.pushEnabled,
       receiptPreference: preferences.receiptPreference,
+      digestFrequency: preferences.digestFrequency,
       assetFilters: preferences.assetFilters,
       minAmount: preferences.minAmount !== undefined && preferences.minAmount !== null
         ? String(preferences.minAmount)
@@ -303,6 +318,36 @@ export class NotificationsService {
     data: Parameters<typeof slackNotificationProvider.buildBlockKitPayload>[0],
   ) {
     return slackNotificationProvider.dispatch(target, data);
+  }
+
+  /**
+   * Trigger the 24-hour transaction & security digest for a single user.
+   * Respects the user's digest frequency setting (daily/weekly/off).
+   *
+   * @param userId - User ID
+   * @param options - Optional overrides (e.g. force send for testing)
+   */
+  async sendDigest(
+    userId: string,
+    options: { force?: boolean } = {}
+  ): Promise<{ sent: boolean; reason?: string }> {
+    const prefs = await prisma.notificationPreference.findUnique({ where: { userId } });
+    if (!prefs) {
+      return { sent: false, reason: 'no_preferences' };
+    }
+    // Lazy-load the digest worker so a broken/missing worker module cannot
+    // break this service at import time.
+    try {
+      const mod = await import('../../workers/digest.worker');
+      const digestWorker = (mod as any)?.digestWorker;
+      if (!digestWorker || typeof digestWorker.processUser !== 'function') {
+        return { sent: false, reason: 'digest_worker_unavailable' };
+      }
+      return await digestWorker.processUser(userId, prefs, options);
+    } catch (error: any) {
+      logger.warn?.('[NotificationsService] digest worker unavailable', error?.message);
+      return { sent: false, reason: error?.message || 'digest_worker_unavailable' };
+    }
   }
 }
 

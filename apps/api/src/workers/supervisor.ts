@@ -67,7 +67,7 @@ export class WorkerSupervisor {
     });
 
     child.on('exit', (code, signal) => {
-      console.error(
+      log.error(
         `[Supervisor] ⚠️ Worker "${name}" (pid ${child.pid}) exited — code=${code} signal=${signal}. ` +
         `Restart #${worker.restartCount + 1} scheduled.`
       );
@@ -105,7 +105,7 @@ export class WorkerSupervisor {
       child.send({ type: 'ping' });
 
       worker.pongTimeout = setTimeout(() => {
-        console.error(
+        log.error(
           `[Supervisor] ⚠️ Worker "${worker.name}" (pid ${child.pid}) missed its heartbeat and appears frozen. ` +
             'Killing so it can be restarted.'
         );
