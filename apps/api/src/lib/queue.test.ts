@@ -136,6 +136,7 @@ import { prisma } from './prisma';
 import { dispatchWhatsAppAlert } from '../utils/whatsapp';
 import { dispatchDiscordAlert } from '../utils/discord';
 import { dispatchSlackAlert } from '../utils/slack';
+import { emailService } from '../services/email.service';
 
 describe('Queue DLQ routing', () => {
   beforeEach(() => {
@@ -143,19 +144,31 @@ describe('Queue DLQ routing', () => {
     mockRedisStore.clear();
   });
 
-  it('routes to DLQ when job fails after max attempts', async () => {
+  it('routes to DLQ queue and persists to DeadLetter table when job fails after 5 attempts (#539)', async () => {
     (Job.fromId as any).mockResolvedValue({
       attemptsMade: 5,
       opts: { attempts: 5 },
-      data: { txHash: 'test-tx' },
+      data: { txHash: 'test-tx', paymentId: 'pay-123' },
     });
 
     await failedJobHandler({ jobId: '123', failedReason: 'Test error' });
 
     expect(MockQueueAdd).toHaveBeenCalledWith(
       'dispatch-alert-failed',
-      { txHash: 'test-tx' },
+      { txHash: 'test-tx', paymentId: 'pay-123' },
       { jobId: 'dlq-123' }
+    );
+    expect(prisma.deadLetter.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          channel: 'queue',
+          jobId: '123',
+          attemptsMade: 5,
+          maxAttempts: 5,
+          failureReason: 'max_attempts_exceeded',
+          status: 'pending',
+        }),
+      })
     );
   });
   
@@ -169,6 +182,7 @@ describe('Queue DLQ routing', () => {
     await failedJobHandler({ jobId: '124', failedReason: 'Test error' });
 
     expect(MockQueueAdd).not.toHaveBeenCalled();
+    expect(prisma.deadLetter.create).not.toHaveBeenCalled();
   });
 });
 
@@ -592,5 +606,77 @@ describe('Slack Dispatcher Worker', () => {
     });
 
     expect(dispatchSlackAlert).not.toHaveBeenCalled();
+  });
+});
+
+describe('Email Dispatcher Worker via Resend (#535)', () => {
+  const emailJobData = {
+    paymentId: 'pay-email-1',
+    amount: '50',
+    asset: 'USDC',
+    fromAddress: 'GUSER123',
+    txHash: 'hash-email-1',
+    walletId: 'wallet-email-1',
+    receivedAt: new Date().toISOString(),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('dispatches HTML payment receipt email via Resend when user has email configured', async () => {
+    const sendPaymentReceiptSpy = vi.spyOn(emailService, 'sendPaymentReceipt').mockResolvedValue({ id: 'resend-msg-1' });
+
+    (prisma.payment.findUnique as any).mockResolvedValue({
+      id: 'pay-email-1',
+      wallet: {
+        user: {
+          id: 'user-email-1',
+          email: 'recipient@example.com',
+          notifyPrefs: { emailEnabled: true },
+        },
+      },
+    });
+
+    await paymentAlertWorkerProcessor({ data: emailJobData });
+
+    expect(sendPaymentReceiptSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipientEmail: 'recipient@example.com',
+        emailEnabled: true,
+      }),
+      expect.objectContaining({
+        paymentId: 'pay-email-1',
+        txHash: 'hash-email-1',
+        amount: '50',
+        asset: 'USDC',
+        fromAddress: 'GUSER123',
+      })
+    );
+  });
+
+  it('skips email dispatch when emailEnabled is false', async () => {
+    const sendPaymentReceiptSpy = vi.spyOn(emailService, 'sendPaymentReceipt').mockResolvedValue({ skipped: true });
+
+    (prisma.payment.findUnique as any).mockResolvedValue({
+      id: 'pay-email-1',
+      wallet: {
+        user: {
+          id: 'user-email-1',
+          email: 'recipient@example.com',
+          notifyPrefs: { emailEnabled: false },
+        },
+      },
+    });
+
+    await paymentAlertWorkerProcessor({ data: emailJobData });
+
+    expect(sendPaymentReceiptSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipientEmail: 'recipient@example.com',
+        emailEnabled: false,
+      }),
+      expect.any(Object)
+    );
   });
 });

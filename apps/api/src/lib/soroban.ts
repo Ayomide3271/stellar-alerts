@@ -2042,7 +2042,6 @@ export async function simulateContractCall(
       return null;
     }
 
-    // Check if simulation was successful and has return value
     const retval = sim.result?.retval || (sim as any).retval;
     if (retval) {
       return StellarSdk.scValToNative(retval);
@@ -2084,7 +2083,6 @@ async function discoverSacMetadata(contractId: string): Promise<SacDiscoveryResu
   }
 
   try {
-    // Query decimals, symbol, name via contract simulation in parallel
     const [decimalsVal, symbolVal, nameVal] = await Promise.all([
       simulateContractCall(contractId, 'decimals'),
       simulateContractCall(contractId, 'symbol'),

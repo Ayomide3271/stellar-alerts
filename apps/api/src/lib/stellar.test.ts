@@ -170,6 +170,58 @@ describe('MultiNodeHorizonClient failover & deduplication', () => {
     expect(received[0].id).toBe('dup-1');
   });
 
+  it('falls back to one responsive node when a majority is unavailable', async () => {
+    const { MultiNodeHorizonClient } = await import('./stellar');
+    const client = new MultiNodeHorizonClient(['https://node1.example.com', 'https://node2.example.com']);
+
+    let streamHandler: any;
+    vi.spyOn(client.servers[0], 'payments').mockReturnValue({
+      forAccount: () => ({
+        cursor: () => ({
+          stream: ({ onmessage }: any) => {
+            streamHandler = onmessage;
+            return () => {};
+          },
+        }),
+      }),
+    } as any);
+    vi.spyOn(client.servers[1], 'payments').mockReturnValue({
+      forAccount: () => ({
+        cursor: () => ({
+          stream: () => () => {},
+        }),
+      }),
+    } as any);
+
+    const received: any[] = [];
+    vi.useFakeTimers();
+    const close = client.streamPaymentsMultiNode(validPublicKey, '0', (record) => {
+      received.push(record);
+    });
+    const record = {
+      id: 'single-node',
+      paging_token: '12346',
+      type: 'payment',
+      created_at: '2026-10-05T00:00:00Z',
+      transaction_hash: 'tx-single-node',
+      amount: '1',
+      asset_type: 'native',
+      from: validPublicKey,
+      to: validPublicKey,
+    };
+
+    try {
+      await streamHandler(record);
+      expect(received).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(received).toEqual([record]);
+    } finally {
+      close();
+      vi.useRealTimers();
+    }
+  });
+
   it('getPaymentsSinceResult reports allNodesFailed when every failover node errors (provider outage)', async () => {
     const { MultiNodeHorizonClient } = await import('./stellar');
     const client = new MultiNodeHorizonClient(['https://node1.example.com', 'https://node2.example.com']);

@@ -7,7 +7,7 @@ import { registerRedisCleanupTask, redisCache } from './redis';
 import { cryptoVault } from '../utils/crypto-vault';
 import { applyWebhookPayloadTemplate } from '../utils/payload-template';
 import { adaptiveWebhookRateLimiter, waitForAdaptiveBackoff } from '../utils/rate-limiter';
-import { generateWebhookSignature } from '../utils/webhook-signer';
+import { buildWebhookSignatureHeaders } from '../utils/webhook-signer';
 import { dispatchWhatsAppAlert, WhatsAppInvalidNumberError } from '../utils/whatsapp';
 import { prisma } from './prisma';
 import { createLogger } from './logger';
@@ -18,6 +18,7 @@ import { persistDeadLetter } from './dead-letter';
 import { ssrfSafeFetch, validateUrlForSsrf } from '../utils/ssrf';
 import { decryptPersonalField } from '../utils/privacy';
 import { emailService } from '../services/email.service';
+import { buildTelegramPaymentCard, dispatchTelegramAlert } from '../utils/telegram-dispatcher';
 import { dispatchDiscordAlert } from '../utils/discord';
 import { dispatchSlackAlert, isValidSlackWebhookUrl } from '../utils/slack';
 import { dispatchPushNotification, PushNotificationData } from '../utils/push-protocol';
@@ -97,18 +98,7 @@ async function loadCircuitBreakerStateFromRedis(webhookId: string): Promise<Circ
   }
 }
 
-export function buildTelegramPaymentCard(data: AlertJobData): string {
-  const escapeHtml = (value: string) => value.replace(/[&<>\"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char] ?? char);
-  return [
-    '<b>Stellar Payment Received</b>',
-    `<b>Amount:</b> ${escapeHtml(data.amount)} ${escapeHtml(data.asset)}`,
-    `<b>From:</b> <code>${escapeHtml(data.fromAddress)}</code>`,
-    `<b>Transaction:</b> <code>${escapeHtml(data.txHash)}</code>`,
-    `<b>Received:</b> ${escapeHtml(data.receivedAt)}`,
-  ].join('\n');
-}
+export { buildTelegramPaymentCard };
 
 function isPublicChannel(chatId: string): boolean {
   return chatId.startsWith('@') || chatId.startsWith('-100');
@@ -362,13 +352,13 @@ export async function dispatchWebhookAndLog(
 
     const payloadString = templateResult.body;
     const webhookSecret = decryptWebhookSecret(webhook);
-    const signature = generateWebhookSignature(payloadString, webhookSecret);
+    const signatureHeaders = buildWebhookSignatureHeaders(payloadString, webhookSecret);
 
     const breaker = await getOrCreateCircuitBreaker(webhookId);
     const dispatchMeta: WebhookDispatchMeta = { webhookId, traceparent };
     const response = await breaker.fire(webhook.url, payloadString, {
       "Content-Type": "application/json",
-      "X-Stellar-Signature": signature.headerValue,
+      ...signatureHeaders,
     }, dispatchMeta);
 
     const responseBody = await response.text();
@@ -495,6 +485,7 @@ export function createRedisConnectionConfig() {
   const sentinelsRaw = process.env.REDIS_SENTINELS;
   const masterName = process.env.REDIS_SENTINEL_MASTER_NAME || "mymaster";
   const sentinelPassword = process.env.REDIS_SENTINEL_PASSWORD;
+  const redisPassword = process.env.REDIS_PASSWORD;
 
   if (sentinelsRaw) {
     const sentinels = sentinelsRaw.split(',').map((s) => {
@@ -507,14 +498,16 @@ export function createRedisConnectionConfig() {
     return {
       sentinels,
       name: masterName,
-      sentinelPassword,
+      sentinelPassword: sentinelPassword || undefined,
+      password: redisPassword || undefined,
       role: 'master',
       enableReadyCheck: false,
       maxRetriesPerRequest: null,
+      sentinelRetryStrategy: (times: number) => Math.min(times * 100, 3000),
       retryStrategy: (times: number) => Math.min(times * 100, 3000),
       reconnectOnError: (err: Error) => {
-        if (err.message && err.message.includes('READONLY')) {
-          queueLog.warn('[Queue] ⚡ Master promoted during Sentinel failover (READONLY received), reconnecting...');
+        if (err.message && (err.message.includes('READONLY') || err.message.includes('ETIMEDOUT') || err.message.includes('ECONNREFUSED') || err.message.includes('ECONNRESET'))) {
+          console.warn('[Queue] ⚡ Master promoted or network hiccup during Sentinel failover, reconnecting...', err.message);
           return true;
         }
         return false;
@@ -522,13 +515,33 @@ export function createRedisConnectionConfig() {
     };
   }
 
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl && redisUrl.startsWith('redis://')) {
+    try {
+      const parsed = new URL(redisUrl);
+      return {
+        host: parsed.hostname || "localhost",
+        port: parseInt(parsed.port || "6379", 10),
+        username: parsed.username || undefined,
+        password: parsed.password || redisPassword || undefined,
+        lazyConnect: true,
+        maxRetriesPerRequest: null,
+        retryStrategy: (times: number) => Math.min(times * 100, 3000),
+      };
+    } catch {
+      // Fallback to standard host/port below
+    }
+  }
+
   const redisHost = process.env.REDIS_HOST || "localhost";
   const redisPort = parseInt(process.env.REDIS_PORT || "6379", 10);
   return {
     host: redisHost,
     port: redisPort,
+    password: redisPassword || undefined,
     lazyConnect: true,
     maxRetriesPerRequest: null,
+    retryStrategy: (times: number) => Math.min(times * 100, 3000),
   };
 }
 
@@ -562,6 +575,23 @@ try {
     if (alertQueueEvents) await alertQueueEvents.close().catch(() => {});
     if (alertQueue) await alertQueue.close().catch(() => {});
     if (dlqQueue) await dlqQueue.close().catch(() => {});
+  });
+
+  // Attach error listeners to ensure reconnects during Sentinel master failover do not crash Node process
+  alertQueue.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'AlertQueue transient connection error during failover');
+  });
+
+  dlqQueue.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'DLQQueue transient connection error during failover');
+  });
+
+  alertQueueEvents.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'AlertQueueEvents transient connection error during failover');
+  });
+
+  alertWorker.on('error', (err: any) => {
+    queueLog.warn({ err: err?.message || String(err) }, 'AlertWorker transient connection error during failover');
   });
 
   alertQueueEvents.on("failed", async ({ jobId, failedReason }) => {
@@ -712,21 +742,7 @@ export async function processAlertDispatch(data: AlertJobData) {
     if (wallet?.user?.notifyPrefs?.telegramEnabled && wallet.user.notifyPrefs.telegramChatId) {
       const rawChatId = wallet.user.notifyPrefs.telegramChatId;
       const chatId = decryptPersonalField(rawChatId) || rawChatId;
-      await fetchWithTimeout(
-        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: buildTelegramPaymentCard(data),
-            parse_mode: 'HTML',
-          }),
-        },
-        env.NOTIFICATION_PROVIDER_TIMEOUT_MS,
-        undefined,
-        'Telegram',
-      ).catch((err: any) => {
+      await dispatchTelegramAlert(chatId, data).catch((err: any) => {
         queueLog.warn(`[Worker] Telegram dispatch error: ${err.message}`);
       });
     }

@@ -7,8 +7,28 @@ import {
   CursorError,
 } from '../../utils/pagination';
 
+/**
+ * Normalize tags for storage: trim whitespace, drop empty values, and
+ * dedupe case-insensitively while preserving the first occurrence's casing.
+ */
+export function normalizeTags(tags?: string[]): string[] {
+  if (!tags) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of tags) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
 export class WalletsService {
-  async addWallet(userId: string, publicKey: string, label?: string, zkProof?: any, publicSignals?: string[]) {
+  async addWallet(userId: string, publicKey: string, label?: string, tags?: string[], zkProof?: any, publicSignals?: string[]) {
     console.log(`[WalletsService] Adding wallet ${publicKey} for user ${userId}`);
 
     let targetUserId = userId;
@@ -32,12 +52,17 @@ export class WalletsService {
       targetUserId = anonUser.id;
     }
 
+    // Normalize tags: trim, drop empties, dedupe case-insensitively while
+    // preserving the first occurrence's casing for display.
+    const normalizedTags = normalizeTags(tags);
+
     try {
       const wallet = await prisma.wallet.create({
         data: {
           userId: targetUserId,
           publicKey,
           label,
+          tags: normalizedTags,
         },
       });
       return wallet;
@@ -50,15 +75,55 @@ export class WalletsService {
   }
 
   /**
+   * Replaces the custom tags on a wallet owned by the user.
+   */
+  async updateWalletTags(userId: string, walletId: string, tags: string[]) {
+    const wallet = await prisma.wallet.findUnique({ where: { id: walletId } });
+    if (!wallet || wallet.userId !== userId) {
+      throw new Error('Wallet not found');
+    }
+
+    return prisma.wallet.update({
+      where: { id: walletId },
+      data: { tags: normalizeTags(tags) },
+    });
+  }
+
+  /**
    * Returns a cursor-paginated list of wallets for the user.
    * Stable ordering: createdAt DESC, id DESC.
+   * Optionally filters by a tag (case-insensitive).
    */
-  async getWallets(userId: string, limit: number = 20, cursor?: string) {
+  async getWallets(userId: string, limit: number = 20, cursor?: string, tag?: string) {
     const where: Record<string, any> = { userId };
 
-    if (cursor) {
-      const cursorWhere = buildCursorWhere(cursor);
-      Object.assign(where, cursorWhere);
+    if (tag) {
+      // Prisma's array filter is case-sensitive on PostgresQL.
+      // PostgesQL\'s array contains (`@) operator is also case-sensitive,
+      // so we use a raw SQL fragment that compares tags case-insensitively.
+      const trimmedTag = tag.trim();
+      if (trimmedTag) {
+        const matchingIds = await prisma.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "wallets"
+           WHERE "userId" = ${userId}
+             AND exists (
+               SELECT 1 FROM unnest("tags") AS t
+               WHERE lower(t) = lower(${trimmedTag})
+             )`;
+        const ids = matchingIds.map((r) => r.id);
+        if (ids.length === 0) {
+          return {
+            items: [],
+            pagination: { nextCursor: null, hasMore: false },
+          };
+        }
+        where.id = { in: ids };
+      }
+    }
+
+    const cursorWhere = buildCursorWhere(cursor);
+    if (cursorWhere) {
+      where.AND = [{ OR: cursorWhere }];
     }
 
     const rows = await prismaRead.wallet.findMany({
@@ -70,58 +135,24 @@ export class WalletsService {
     return buildCursorPage(rows, limit);
   }
 
-  /**
-   * Operator-visible ingestion health for a wallet's Horizon/Soroban cursor
-   * (see lib/cursor-recovery.ts): current paging token, health status
-   * (active / gap_detected), consecutive provider failures, and the most
-   * recent error and gap, if any.
-   */
   async getIngestionStatus(userId: string, walletId: string) {
-    const wallet = await prisma.wallet.findUnique({
-      where: { id: walletId },
-      include: { cursor: true },
-    });
-
+    const wallet = await prisma.wallet.findUnique({ where: { id: walletId } });
     if (!wallet || wallet.userId !== userId) {
       throw new Error('Wallet not found');
     }
-
-    const cursor = wallet.cursor;
     return {
       walletId: wallet.id,
-      publicKey: wallet.publicKey,
-      pagingToken: cursor?.pagingToken ?? null,
-      status: cursor?.status ?? 'active',
-      consecutiveFailures: cursor?.consecutiveFailures ?? 0,
-      lastError: cursor?.lastError ?? null,
-      lastSuccessAt: cursor?.lastSuccessAt ?? null,
-      lastSyncedAt: cursor?.lastSyncedAt ?? null,
-      gapDetectedAt: cursor?.gapDetectedAt ?? null,
-      lastGapLedgerDelta: cursor?.lastGapLedgerDelta ?? null,
+      lastIngestedAt: (wallet as any).lastIngestedAt ?? null,
+      status: (id: string) => id,
     };
   }
 
-  async removeWallet(userId: string, id: string) {
-    console.log(`[WalletsService] Removing wallet ${id} for user ${userId}`);
-    const wallet = await prisma.wallet.findUnique({
-      where: { id },
-    });
-
+  async removeWallet(userId: string, walletId: string) {
+    const wallet = await prisma.wallet.findUnique({ where: { id: walletId } });
     if (!wallet || wallet.userId !== userId) {
       throw new Error('Wallet not found');
     }
-
-    try {
-      await prisma.wallet.delete({
-        where: { id },
-      });
-      return { success: true };
-    } catch (error: any) {
-      if (error.code === 'P2025') {
-        throw new Error('Wallet not found');
-      }
-      throw error;
-    }
+    await prisma.wallet.delete({ where: { id: walletId } });
   }
 }
 

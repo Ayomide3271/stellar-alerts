@@ -235,7 +235,7 @@ describe('vault – invalid metadata validation', () => {
 
   it('rejects unknown KDF algorithm', async () => {
     const sealed = await sealVault(makePayload(), TEST_PASSWORD, FAST_PARAMS);
-    const bad: any = { ...sealed, kdf: 'argon2id' };
+    const bad: any = { ...sealed, kdf: 'pbkdf2' };
     await expect(openVault(bad, TEST_PASSWORD)).rejects.toMatchObject({
       code: 'VAULT_INVALID_METADATA',
     });
