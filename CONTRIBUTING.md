@@ -107,6 +107,24 @@ formats. You can run the same secret check directly with:
 npm run check:secrets -- --staged
 ```
 
+The pre-commit entry point is `scripts/scan-staged-secrets.mjs` (also available
+as `npm run check:secrets:staged`). It runs before expensive generation and
+again after generated files are staged. A failure prints locations and detector
+names, never the secret itself. Remove the literal, use an environment variable,
+and **stage the corrected file again**; editing only the working tree does not
+remove a secret from the index. If it was already shared, revoke/rotate it.
+
+For reviewed, intentionally synthetic fixtures only, `git commit --no-verify`
+bypasses local hooks. It does not bypass CI scanning. Prefer constructing fixture
+keys from fragments so no complete secret-like value is committed.
+
+Stellar seeds use the base32 pattern `S[A-Z2-7]{55}`; public `G...` keys and
+malformed lengths are not flagged. JWT secret/signing-key assignments are checked
+even when their literal values contain no digits. Documented placeholders and
+environment references remain allowed. This is a focused pattern check, not a
+guarantee that arbitrary or obfuscated credentials will be detected.
+
+
 The secret scanner inspects only added text lines in the staged diff (or in
 each commit from the base-to-head range used in CI). It reports the detector
 type, file, and line number without printing the matching value. It

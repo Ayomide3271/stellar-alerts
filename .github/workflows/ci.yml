@@ -11,6 +11,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contributor-checks:
+    name: Contributor Secret Scanner Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+      - run: node --test tools/check-env-examples.test.mjs tools/check-secrets.test.mjs
+
   # One contract, every workspace: typecheck + build for apps/api, apps/web,
   # packages/shared and packages/cli on the single supported Node version
   # pinned by .nvmrc. The guard in `validate` keeps this matrix in sync with
