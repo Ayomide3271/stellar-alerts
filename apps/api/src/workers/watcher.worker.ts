@@ -14,6 +14,7 @@ import {
 } from '../lib/soroban';
 import { contractRouter } from '../lib/contract-router';
 import { withWalletLock } from '../lib/lock';
+import { distributedLockManager } from '../lib/redlock';
 import { shouldAlert, PaymentContext } from '../lib/rules-engine';
 import { evaluateAlertRules, evaluateAndDispatch, AlertRuleRecord, NormalizedPaymentEvent } from '../lib/alert-rule-evaluator';
 import { MemoryMonitor, MemorySnapshot } from '../utils/memory-monitor';
@@ -662,6 +663,17 @@ export async function startHorizonSSEStream(
       return noopClose;
     }
 
+    // Coordinate with peer worker replicas via distributed locking (#744)
+    const lock = await distributedLockManager.acquireWalletLock(wallet.id);
+    if (!lock) {
+      log.info(
+        `[WatcherStream] 🔒 Distributed lock for wallet ${wallet.publicKey.substring(0, 8)}... (${wallet.id}) held by peer replica. Skipping stream.`
+      );
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+      return noopClose;
+    }
+
     const maxAttempts = options.maxReconnectAttempts ?? Infinity;
     const reconnectDelay = options.reconnectDelayMs ?? 1000;
     const maxReconnectDelay = options.maxReconnectDelayMs ?? reconnectDelay * 30;
@@ -811,6 +823,7 @@ export async function startHorizonSSEStream(
     return () => {
       isClosed = true;
       cleanupCurrent();
+      void distributedLockManager.releaseWalletLock(wallet.id);
     };
   });
 }
@@ -956,6 +969,9 @@ export async function runWatcher() {
   });
   watcherLifecycle.registerCleanup('prisma', async () => {
     await prisma.$disconnect();
+  });
+  watcherLifecycle.registerCleanup('distributedLocks', async () => {
+    await distributedLockManager.releaseAll();
   });
 
   await loadContractRegistry();
