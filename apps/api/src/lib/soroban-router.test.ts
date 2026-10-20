@@ -374,4 +374,30 @@ describe("Soroban Multi-Contract Router", () => {
 
     expect(routes).toHaveLength(0);
   });
+  it("caps the registry at 100 distinct contracts but keeps every subscriber of admitted ones", async () => {
+    const mockSubscriptions = [];
+    for (let i = 0; i < 105; i++) {
+      mockSubscriptions.push({
+        id: `sub-${i}`,
+        userId: `user-${i}`,
+        contractId: `CAP${String(i).padStart(6, "0")}`,
+        topic: "transfer",
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+    // second subscriber on the first (admitted) contract
+    mockSubscriptions.push({ ...mockSubscriptions[0], id: "sub-dup", userId: "user-dup" });
+
+    vi.mocked(prisma.sorobanContractSubscription.findMany).mockResolvedValueOnce(
+      mockSubscriptions
+    );
+
+    await loadContractRegistry();
+
+    expect(getActiveContractIds()).toHaveLength(100);
+    expect(getContractSubscriberCount("CAP000000")).toBe(2);
+    expect(getContractSubscriberCount("CAP000104")).toBe(0);
+  });
 });
