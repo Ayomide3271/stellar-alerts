@@ -1,18 +1,20 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { createWebhookSchema, webhookParamsSchema, listWebhookLogsQuerySchema } from './webhooks.schema';
+import { webhookParamsSchema, listWebhookLogsQuerySchema } from './webhooks.schema';
+import { validateWebhookRegistration } from './webhook.validator';
 import { webhooksService } from './webhooks.service';
 import { CursorError } from '../../utils/pagination';
 import { NotFoundError, zodValidationError } from '../../lib/errors';
 
 export class WebhooksController {
   async addWebhook(request: FastifyRequest, reply: FastifyReply) {
-    const parsed = createWebhookSchema.safeParse(request.body);
-    if (!parsed.success) {
-      throw zodValidationError(parsed, 'Invalid payload');
-    }
+    const validated = await validateWebhookRegistration(request.body);
 
     const userId = (request as any).user.id;
-    const webhook = await webhooksService.addWebhook(userId, parsed.data.url, parsed.data.payloadTemplate);
+    const webhook = await webhooksService.addWebhook(
+      userId,
+      validated.url,
+      validated.payloadTemplate
+    );
     return reply.status(201).send({ success: true, webhook });
   }
 

@@ -9,7 +9,7 @@ const CONTRACT_ID = process.env.SOROBAN_CONTRACT_ID || '';
 const BACKFILL_BATCH_SIZE = 1000; // Insert in batches for performance
 const BACKFILL_START_LEDGER = parseInt(process.env.SOROBAN_BACKFILL_START_LEDGER || '1', 10);
 
-interface BackfillStats {
+export interface BackfillStats {
   totalEventsProcessed: number;
   eventsStored: number;
   eventsDuplicated: number;
@@ -17,18 +17,29 @@ interface BackfillStats {
 }
 
 /**
- * Deduplicates events using database unique constraint.
- * Returns inserted count.
+ * Deduplicates events using in-batch fingerprinting and database unique constraint.
+ * Returns inserted and duplicated counts.
  */
-async function deduplicateAndStoreEvents(events: any[]): Promise<{ stored: number; duplicated: number }> {
+export async function deduplicateAndStoreEvents(
+  events: any[]
+): Promise<{ stored: number; duplicated: number }> {
   if (events.length === 0) return { stored: 0, duplicated: 0 };
 
   let stored = 0;
   let duplicated = 0;
+  const seenInBatch = new Set<string>();
 
   for (const event of events) {
     const parsed = parseSorobanTransferEvent(event);
     if (!parsed) continue;
+
+    const ledgerSeq = parsed.ledgerSeq || 0;
+    const fingerprint = `${parsed.contractId}:${ledgerSeq}:${parsed.from}:${parsed.to}:${parsed.amount}`;
+    if (seenInBatch.has(fingerprint)) {
+      duplicated++;
+      continue;
+    }
+    seenInBatch.add(fingerprint);
 
     try {
       await prisma.sorobanEventSnapshot.create({
@@ -37,7 +48,7 @@ async function deduplicateAndStoreEvents(events: any[]): Promise<{ stored: numbe
           from: parsed.from,
           to: parsed.to,
           amount: parsed.amount,
-          ledgerSeq: parsed.ledgerSeq || 0,
+          ledgerSeq,
           eventType: 'transfer',
         },
       });
@@ -60,8 +71,9 @@ async function deduplicateAndStoreEvents(events: any[]): Promise<{ stored: numbe
  */
 export async function runSorobanBackfill(
   contractId: string = CONTRACT_ID,
-  startLedger: number = BACKFILL_START_LEDGER
-) {
+  startLedger: number = BACKFILL_START_LEDGER,
+  targetEndLedger?: number
+): Promise<BackfillStats | undefined> {
   if (!contractId) {
     console.error('[Backfill] SOROBAN_CONTRACT_ID not set');
     return;
@@ -79,8 +91,11 @@ export async function runSorobanBackfill(
   };
 
   try {
-    // Get current latest ledger
-    const latestLedger = await getSorobanLatestLedger();
+    // Resolve target end ledger or fetch current latest ledger
+    const latestLedger =
+      typeof targetEndLedger === 'number' && targetEndLedger > 0
+        ? targetEndLedger
+        : await getSorobanLatestLedger();
     if (latestLedger === 0) {
       console.error('[Backfill] Could not fetch latest ledger');
       return;
@@ -108,15 +123,19 @@ export async function runSorobanBackfill(
     }
 
     console.log(`[Backfill] ✅ Backfill complete:`, stats);
+    return stats;
   } catch (error: any) {
     console.error(`[Backfill] Fatal error:`, error.message);
+    return stats;
   }
 }
 
 /**
  * Incremental backfill: fetches events since last known ledger.
  */
-export async function runIncrementalBackfill(contractId: string = CONTRACT_ID) {
+export async function runIncrementalBackfill(
+  contractId: string = CONTRACT_ID
+): Promise<BackfillStats | undefined> {
   if (!contractId) {
     console.error('[IncrementalBackfill] SOROBAN_CONTRACT_ID not set');
     return;
@@ -164,8 +183,10 @@ export async function runIncrementalBackfill(contractId: string = CONTRACT_ID) {
     }
 
     console.log(`[IncrementalBackfill] ✅ Complete:`, stats);
+    return stats;
   } catch (error: any) {
     console.error(`[IncrementalBackfill] Error:`, error.message);
+    return;
   }
 }
 
