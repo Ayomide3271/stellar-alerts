@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { authController } from './auth.controller';
+import { sep10Controller } from './sep10.controller';
 import { authenticateHook } from '../../middleware/auth.middleware';
 
 export async function authRoutes(app: FastifyInstance) {
@@ -13,6 +14,10 @@ export async function authRoutes(app: FastifyInstance) {
   app.get('/auth/me', { preHandler: [authenticateHook] }, authController.getMe.bind(authController));
   app.post('/auth/logout', { preHandler: [authenticateHook] }, authController.logout.bind(authController));
   
+  // SEP-0010 Stellar Web Authentication endpoints
+  app.get('/auth/sep10/challenge', sep10Controller.getChallenge.bind(sep10Controller));
+  app.post('/auth/sep10/verify', sep10Controller.verify.bind(sep10Controller));
+
   // MFA endpoints (require authentication)
   app.post('/auth/mfa/setup', { preHandler: [authenticateHook] }, authController.setupMFA.bind(authController));
   app.post('/auth/mfa/enable', { preHandler: [authenticateHook] }, authController.enableMFA.bind(authController));

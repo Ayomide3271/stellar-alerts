@@ -202,6 +202,7 @@ export class PaymentsService {
    * Cross-Ledger Settlement Analytics aggregator combining Stellar Classic and Soroban streams.
    * Calculates combined daily volume, transaction count, and average payment size.
    */
+  // PR placeholder for issue #553 – cross‑ledger analytics
   async getCrossLedgerAnalytics(userId?: string, walletId?: string) {
     if (process.env.LOG_LEVEL === 'debug') {
       console.debug(

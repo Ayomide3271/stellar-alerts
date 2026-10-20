@@ -98,6 +98,11 @@ export class PaymentsController {
     return reply.send({ success: true, summary });
   }
 
+  // PR placeholder for issue #533 – payment summary endpoint
+  async getPaymentsSummary(request: FastifyRequest, reply: FastifyReply) {
+    return this.getSummary(request, reply);
+  }
+
   /**
    * POST /payments/estimate-fee
    *
