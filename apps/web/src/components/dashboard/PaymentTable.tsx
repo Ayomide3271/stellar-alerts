@@ -86,7 +86,7 @@ export const PaymentTable: React.FC<PaymentTableProps> = ({ payments = [], isLoa
   };
 
   return (
-    <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800 backdrop-blur-xl shadow-xl space-y-6">
+    <div className="min-w-0 p-4 sm:p-6 rounded-2xl bg-slate-900/60 border border-slate-800 backdrop-blur-xl shadow-xl space-y-6">
       {/* Header & Title */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -220,7 +220,7 @@ export const PaymentTable: React.FC<PaymentTableProps> = ({ payments = [], isLoa
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm border-collapse">
+          <table className="w-full min-w-[760px] text-left text-sm border-collapse">
             <thead>
               <tr className="border-b border-slate-800 text-xs font-semibold uppercase tracking-wider text-slate-400">
                 <th className="py-3.5 px-4">Timestamp</th>

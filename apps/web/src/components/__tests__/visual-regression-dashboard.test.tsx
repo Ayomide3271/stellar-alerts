@@ -25,9 +25,9 @@ describe('Visual Regression & Responsive Dashboard States (#332)', () => {
     });
   });
 
-  describe('Mobile Viewport (375px)', () => {
-    it('renders mobile layout without breaking card containers', () => {
-      window.innerWidth = 375;
+  describe('Mobile Viewport (360px and 375px)', () => {
+    it.each([360, 375])('renders mobile layout without breaking card containers at %ipx', (width) => {
+      window.innerWidth = width;
       window.dispatchEvent(new Event('resize'));
 
       render(
@@ -48,6 +48,10 @@ describe('Visual Regression & Responsive Dashboard States (#332)', () => {
 
       expect(screen.getByText(/\+50/i)).toBeInTheDocument();
       expect(screen.getAllByText('USDC').length).toBeGreaterThan(0);
+
+      const table = screen.getByRole('table');
+      expect(table).toHaveClass('min-w-[760px]');
+      expect(table.parentElement).toHaveClass('overflow-x-auto');
     });
   });
 
