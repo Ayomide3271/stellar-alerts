@@ -16,10 +16,10 @@ const DETECTORS = [
   ['Telegram bot token', /\b[0-9]{8,10}:[A-Za-z0-9_-]{35,}\b/],
 ];
 
-const SENSITIVE_NAME = /(?:^|_)(?:SECRET|TOKEN|PASSWORD|PRIVATE_KEY|API_KEY|AUTH_KEY|CREDENTIALS?|SEED)(?:_|$)/;
-const QUOTED_DECLARATION = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z][A-Za-z0-9_]*)(?:\s*:\s*string)?\s*=\s*(["'`])([^"'`]+)\2\s*[,;]?\s*$/;
-const QUOTED_ASSIGNMENT = /^\s*(?:(?:process\.env|this)\.)?["']?([A-Za-z][A-Za-z0-9_]*)["']?\s*[:=]\s*(["'`])([^"'`]+)\2\s*[,;]?\s*$/;
-const UNQUOTED_ASSIGNMENT = /^\s*([A-Za-z][A-Za-z0-9_]*)\s*[:=]\s*([A-Za-z0-9_+/-]{20,}={0,2})\s*(?:#.*)?$/;
+const SENSITIVE_NAME = /(?:^|_)(?:SECRET|TOKEN|PASSWORD|PRIVATE_KEY|SIGNING_KEY|API_KEY|AUTH_KEY|CREDENTIALS?|SEED)(?:_|$)/;
+const QUOTED_DECLARATION = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z][A-Za-z0-9_]*)(?:\s*:\s*string)?\s*=\s*(["'`])([^"'`]+)\2\s*[,;]?\s*(?:(?:#|\/\/).*)?$/;
+const QUOTED_ASSIGNMENT = /^\s*(?:(?:process\.env|this)\.)?["']?([A-Za-z][A-Za-z0-9_]*)["']?\s*[:=]\s*(["'`])([^"'`]+)\2\s*[,;]?\s*(?:(?:#|\/\/).*)?$/;
+const UNQUOTED_ASSIGNMENT = /^\s*([A-Za-z][A-Za-z0-9_]*)\s*[:=]\s*([A-Za-z0-9_+/-]+={0,2})\s*(?:#.*)?$/;
 const PLACEHOLDER = /^(?:your[-_]|example|sample|dummy|test[-_]|ci[-_]|placeholder|changeme|generate[-_]|\$|<)/i;
 
 /** Yield only added text lines, with their new-file line numbers. */
@@ -69,7 +69,12 @@ function looksLikeAssignedSecret(text) {
   if (!SENSITIVE_NAME.test(normalizedName)) return false;
 
   const value = quoted ? quoted[3] : unquoted[2];
-  if (value.length < 20 || PLACEHOLDER.test(value)) return false;
+  if (PLACEHOLDER.test(value)) return false;
+  // JWT signing secrets need not contain digits or look random to be sensitive.
+  if (/^JWT_(?:SECRET|PRIVATE_KEY|SIGNING_KEY)$/.test(normalizedName)) {
+    return value.length > 0;
+  }
+  if (value.length < 20) return false;
   if (!/[A-Za-z]/.test(value) || !/[0-9]/.test(value)) return false;
   return new Set(value).size >= 10;
 }
@@ -109,10 +114,10 @@ function readPatch(args) {
   throw new Error('usage');
 }
 
-function main() {
+export function main(args = process.argv.slice(2)) {
   let patch;
   try {
-    patch = readPatch(process.argv.slice(2));
+    patch = readPatch(args);
   } catch (error) {
     console.error(error.message === 'usage'
       ? 'Usage: node tools/check-secrets.mjs --staged | --range BASE_SHA HEAD_SHA'
@@ -124,7 +129,11 @@ function main() {
   const findings = findSecretsInPatch(patch);
   if (findings.length > 0) {
     for (const finding of findings) console.error(formatFinding(finding));
-    console.error(`Secret scan found ${findings.length} potential secret(s).`);
+    console.error(`Secret scan found ${findings.length} potential secret(s). Commit blocked.`);
+    console.error('Remove the secret from the file, use an environment variable, and stage the corrected file again.');
+    console.error('To unstage a file: git restore --staged -- <file> (or git rm --cached -- <file> before the first commit).');
+    console.error('If a real secret was already shared or committed, revoke/rotate it; removing the line does not erase history.');
+    console.error('Only for reviewed synthetic fixtures: git commit --no-verify (bypasses all local hooks, not CI scanning).');
     process.exitCode = 1;
     return;
   }
