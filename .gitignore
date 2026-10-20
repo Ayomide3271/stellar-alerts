@@ -15,6 +15,7 @@ dev.db
 scripts/
 !scripts/dr-failover.ts
 !scripts/generate-types.ts
+!scripts/scan-staged-secrets.mjs
 !scripts/k6-load-test.js
 !scripts/verify-migrations.ts
 !scripts/verify-migrations.test.ts

@@ -1,5 +1,7 @@
 set -e
+# Fail fast before code generation; scan again after generated files are staged.
+node scripts/scan-staged-secrets.mjs
 npm run check:env-examples
 npm run generate:types
 git add openapi.json packages/shared/src/generated/api-types.ts
-npm run check:secrets -- --staged
+node scripts/scan-staged-secrets.mjs
