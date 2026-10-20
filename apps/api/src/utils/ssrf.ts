@@ -142,23 +142,6 @@ export const DEFAULT_MAX_REDIRECTS = 3;
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 
-function getPublicResolvedIps(resolvedIps: string[]): string[] {
-  return [...new Set(resolvedIps.filter((ip) => !isPrivateIp(ip)))];
-}
-
-function buildUrlForResolvedIp(targetUrl: string, resolvedIp: string): string {
-  const parsedUrl = new URL(targetUrl);
-  const isIpv6 = net.isIPv6(resolvedIp);
-  const host = isIpv6 ? `[${resolvedIp}]` : resolvedIp;
-  const port = parsedUrl.port || (parsedUrl.protocol === 'https:' ? '443' : '80');
-
-  const rewritten = new URL(targetUrl);
-  rewritten.hostname = host;
-  rewritten.port = port;
-
-  return rewritten.toString();
-}
-
 const DEFAULT_ALLOWED_PORTS = [80, 443, 8080, 8443];
 
 function getBodyByteLength(body: BodyInit | null | undefined): number {
@@ -303,18 +286,17 @@ export async function validateUrlForSsrf(
     throw new SsrfValidationError(`No IP addresses found for hostname "${hostname}"`, targetUrl, 'NO_IP_RESOLVED');
   }
 
-  const publicResolvedIps = getPublicResolvedIps(resolvedIps);
-
-  if (publicResolvedIps.length === 0) {
-    const blockedIp = resolvedIps[0] ?? rawHost;
-    throw new SsrfValidationError(
-      `Destination resolves to restricted or private IP address (${blockedIp})`,
-      targetUrl,
-      'PRIVATE_IP_BLOCKED',
-    );
+  for (const ip of resolvedIps) {
+    if (isPrivateIp(ip)) {
+      throw new SsrfValidationError(
+        `Destination resolves to restricted or private IP address (${ip})`,
+        targetUrl,
+        'PRIVATE_IP_BLOCKED',
+      );
+    }
   }
 
-  return { url: parsedUrl, resolvedIps: publicResolvedIps };
+  return { url: parsedUrl, resolvedIps };
 }
 
 /**
@@ -341,67 +323,24 @@ export async function ssrfSafeFetch(
   while (true) {
     assertBodySizeLimit(init.body, maxRequestBytes, 'Request body', currentUrl);
 
-    const validation = await validateUrlForSsrf(currentUrl, init.ssrfOptions);
-    const candidateUrls = validation.resolvedIps.map((ip) => buildUrlForResolvedIp(currentUrl, ip));
+    // Validate current hop
+    await validateUrlForSsrf(currentUrl, init.ssrfOptions);
 
-    let lastError: unknown;
-    let handledRedirect = false;
+    // Fetch with redirect set to manual so we inspect and validate every redirect location
+    const response = await fetch(currentUrl, {
+      ...init,
+      redirect: 'manual',
+    });
 
-    for (const candidateUrl of candidateUrls) {
-      try {
-        const response = await fetch(candidateUrl, {
-          ...init,
-          redirect: 'manual',
-        });
-
-        const contentLength = response.headers.get('content-length');
-        if (contentLength) {
-          const parsedLength = Number.parseInt(contentLength, 10);
-          if (!Number.isNaN(parsedLength) && parsedLength > maxResponseBytes) {
-            throw new SsrfValidationError(
-              `Response exceeded the maximum allowed size (${parsedLength} bytes > ${maxResponseBytes} bytes)`,
-              currentUrl,
-              'RESPONSE_TOO_LARGE',
-            );
-          }
-        }
-
-        const isRedirect = [301, 302, 303, 307, 308].includes(response.status);
-
-        if (isRedirect) {
-          if (redirectsCount >= maxRedirects) {
-            throw new SsrfValidationError(`Too many redirects (exceeded limit of ${maxRedirects})`, currentUrl, 'MAX_REDIRECTS_EXCEEDED');
-          }
-
-          const location = response.headers.get('location');
-          if (!location) {
-            throw new SsrfValidationError('Redirect response missing Location header', currentUrl, 'MISSING_REDIRECT_LOCATION');
-          }
-
-          const nextUrl = new URL(location, currentUrl).toString();
-          currentUrl = nextUrl;
-          redirectsCount++;
-          handledRedirect = true;
-          break;
-        }
-
-        const clonedResponse = response.clone();
-        const responseBodyText = await clonedResponse.text();
-        const responseBodyBytes = Buffer.byteLength(responseBodyText, 'utf8');
-        if (responseBodyBytes > maxResponseBytes) {
-          throw new SsrfValidationError(
-            `Response body exceeded the maximum allowed size (${responseBodyBytes} bytes > ${maxResponseBytes} bytes)`,
-            currentUrl,
-            'RESPONSE_TOO_LARGE',
-          );
-        }
-
-        return response;
-      } catch (error) {
-        if (error instanceof SsrfValidationError) {
-          throw error;
-        }
-        lastError = error;
+    const contentLength = response.headers.get('content-length');
+    if (contentLength) {
+      const parsedLength = Number.parseInt(contentLength, 10);
+      if (!Number.isNaN(parsedLength) && parsedLength > maxResponseBytes) {
+        throw new SsrfValidationError(
+          `Response exceeded the maximum allowed size (${parsedLength} bytes > ${maxResponseBytes} bytes)`,
+          currentUrl,
+          'RESPONSE_TOO_LARGE',
+        );
       }
     }
 
@@ -416,18 +355,25 @@ export async function ssrfSafeFetch(
       if (!location) {
         throw new SsrfValidationError('Redirect response missing Location header', currentUrl, 'MISSING_REDIRECT_LOCATION');
       }
-    }
 
-    if (handledRedirect) {
+      // Resolve relative redirect against current URL
+      const nextUrl = new URL(location, currentUrl).toString();
+      currentUrl = nextUrl;
+      redirectsCount++;
       continue;
     }
 
-    if (lastError) {
-      throw lastError;
+    const clonedResponse = response.clone();
+    const responseBodyText = await clonedResponse.text();
+    const responseBodyBytes = Buffer.byteLength(responseBodyText, 'utf8');
+    if (responseBodyBytes > maxResponseBytes) {
+      throw new SsrfValidationError(
+        `Response body exceeded the maximum allowed size (${responseBodyBytes} bytes > ${maxResponseBytes} bytes)`,
+        currentUrl,
+        'RESPONSE_TOO_LARGE',
+      );
     }
 
-    break;
+    return response;
   }
-
-  return new Response(null, { status: 204 });
 }
