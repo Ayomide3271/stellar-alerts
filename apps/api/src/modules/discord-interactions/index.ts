@@ -29,3 +29,13 @@ export {
 } from './discord-interactions.service';
 export { DiscordInteractionsController, discordInteractionsController } from './discord-interactions.controller';
 export { discordInteractionsRoutes } from './discord-interactions.routes';
+export {
+  createMockPayment,
+  createMockPathPayment,
+  createMockTrade,
+  createMockSorobanEvent,
+  type MockPaymentOverrides,
+  type MockPathPaymentOverrides,
+  type MockTradeOverrides,
+  type MockSorobanEventOverrides,
+} from '@stellar-alerts/shared/testing/horizon-fixtures';
