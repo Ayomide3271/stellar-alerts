@@ -16,10 +16,13 @@ const securityHeaders = [
   { key: 'X-Content-Type-Options', value: 'nosniff' },
   // Leak only the origin (no path) when navigating cross-origin.
   { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
-  // HSTS: 1 year with subdomains + preload.
+  // HSTS: 2 years (63072000 seconds) with subdomains + preload in production; relaxed in dev for localhost
   {
     key: 'Strict-Transport-Security',
-    value: 'max-age=31536000; includeSubDomains; preload',
+    value:
+      process.env.NODE_ENV === 'production'
+        ? 'max-age=63072000; includeSubDomains; preload'
+        : 'max-age=0',
   },
   // Disable browser features the app does not use.
   {

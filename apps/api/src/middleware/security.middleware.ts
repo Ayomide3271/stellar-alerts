@@ -31,10 +31,18 @@ export async function registerSecurityHeaders(app: FastifyInstance): Promise<voi
     setIfMissing('X-Content-Type-Options', 'nosniff');
     setIfMissing('X-Frame-Options', 'DENY');
     setIfMissing('Referrer-Policy', 'strict-origin-when-cross-origin');
-    setIfMissing(
-      'Strict-Transport-Security',
-      'max-age=31536000; includeSubDomains; preload',
-    );
+    const isProduction = process.env.NODE_ENV === 'production';
+    if (isProduction) {
+      setIfMissing(
+        'Strict-Transport-Security',
+        'max-age=63072000; includeSubDomains; preload',
+      );
+    } else {
+      setIfMissing(
+        'Strict-Transport-Security',
+        'max-age=0',
+      );
+    }
     setIfMissing(
       'Permissions-Policy',
       'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
