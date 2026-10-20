@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack",
-    "dev:collab": "node ../../node_modules/y-websocket/bin/server.cjs",
-    "build": "next build",
+    "dev": "node init && next dev --webpack",
+    "dev:collab": "node init && node ../../node_modules/y-websocket/bin/server.cjs",
+    "build": "node init && next build",
     "typecheck": "tsc --noEmit",
-    "start": "next start",
+    "start": "node init && next start",
     "lint": "eslint",
     "test": "vitest run"
   },
