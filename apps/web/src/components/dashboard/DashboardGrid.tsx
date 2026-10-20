@@ -105,7 +105,7 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
           onDragOver={handleDragOver(index)}
           onDrop={handleDrop(index)}
           onDragEnd={handleDragEnd}
-          className={`transition-opacity duration-150 ${
+          className={`min-w-0 transition-opacity duration-150 ${
             dragIndex === index ? 'opacity-50' : ''
           }`}
         >
