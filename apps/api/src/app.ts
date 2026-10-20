@@ -18,7 +18,6 @@ import { webhooksRoutes } from './modules/webhooks/webhooks.routes';
 import { accountRoutes } from './modules/account/account.routes';
 import { registerSecurityHeaders } from './middleware/security.middleware';
 import { registerCorrelation } from './middleware/correlation.middleware';
-import { registerIdempotency } from './middleware/idempotency.middleware';
 import { sorobanStateRoutes } from './modules/soroban-state/soroban-state.routes';
 import { notificationsRoutes } from './modules/notifications/notifications.routes';
 import { alertRulesRoutes } from './modules/alert-rules/alert-rules.routes';
@@ -60,6 +59,13 @@ export const buildApp = async () => {
   await app.register(cors, {
     origin: true // Allow all origins for dev, or specify 'http://localhost:3000'
   });
+
+  // Issue #567: correlation IDs — attach x-request-id to every request's
+  // logger so all log lines include a stable reqId for tracing.
+  // Called directly (not via app.register) so the hooks are global rather
+  // than scoped to a plugin encapsulation boundary.
+  await registerCorrelation(app);
+  await registerSecurityHeaders(app);
 
   await app.register(rateLimit, {
     global: true,
