@@ -38,12 +38,15 @@ model Wallet {
   user       User             @relation(fields: [userId], references: [id])
   publicKey  String           @unique
   label      String?
+  tags       String[]         @default([])
+  deletedAt  DateTime?
   createdAt   DateTime         @default(now())
   payments   Payment[]
   cursor     IngestionCursor?
   alertRules AlertRule[]
 
   @@index([userId, createdAt])
+  @@index([deletedAt])
 }
 
 model IngestionCursor {
