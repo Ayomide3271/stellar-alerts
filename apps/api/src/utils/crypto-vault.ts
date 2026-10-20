@@ -78,6 +78,57 @@ export class CryptoVault {
 
     return decrypted.toString('utf8');
   }
+
+  encryptParts(plaintext: string): EncryptedSecretParts {
+    const encrypted = this.encrypt(plaintext);
+    const [version, iv, authTag, ciphertext] = encrypted.split(SEPARATOR);
+    return { version, iv, authTag, ciphertext };
+  }
+
+  decryptParts(
+    parts:
+      | EncryptedSecretParts
+      | WebhookSecretParts
+      | {
+          keyVersion?: string | number;
+          version?: string | number;
+          secretIv?: string;
+          iv?: string;
+          secretAuthTag?: string;
+          authTag?: string;
+          secretCiphertext?: string;
+          ciphertext?: string;
+        }
+  ): string {
+    const version = String((parts as any).version ?? (parts as any).keyVersion ?? '');
+    const iv = (parts as any).iv ?? (parts as any).secretIv ?? '';
+    const authTag = (parts as any).authTag ?? (parts as any).secretAuthTag ?? '';
+    const ciphertext = (parts as any).ciphertext ?? (parts as any).secretCiphertext ?? '';
+    return this.decrypt([version, iv, authTag, ciphertext].join(SEPARATOR));
+  }
+
+  reencrypt(
+    encrypted:
+      | string
+      | EncryptedSecretParts
+      | WebhookSecretParts
+      | Record<string, any>
+  ): string {
+    const plaintext = typeof encrypted === 'string' ? this.decrypt(encrypted) : this.decryptParts(encrypted);
+    return this.encrypt(plaintext);
+  }
+
+  reencryptParts(
+    encrypted:
+      | string
+      | EncryptedSecretParts
+      | WebhookSecretParts
+      | Record<string, any>
+  ): EncryptedSecretParts {
+    return this.encryptParts(
+      typeof encrypted === 'string' ? this.decrypt(encrypted) : this.decryptParts(encrypted)
+    );
+  }
 }
 
 const oldKeys = process.env.MASTER_ENCRYPTION_OLD_KEYS
@@ -111,4 +162,15 @@ export function splitEncryptedSecret(encrypted: string): WebhookSecretParts {
 /** Decrypts a webhook secret from its combined encrypted string form. */
 export function decryptSecret(encrypted: string): string {
   return cryptoVault.decrypt(encrypted);
+}
+
+/** Re-encrypts a webhook record with the latest master encryption key. */
+export function reencryptWebhookSecret(parts: WebhookSecretParts): WebhookSecretParts {
+  const partsEncrypted = cryptoVault.reencryptParts(parts);
+  return {
+    secretCiphertext: partsEncrypted.ciphertext,
+    secretIv: partsEncrypted.iv,
+    secretAuthTag: partsEncrypted.authTag,
+    keyVersion: Number(partsEncrypted.version),
+  };
 }
