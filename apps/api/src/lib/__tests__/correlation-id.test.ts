@@ -41,6 +41,31 @@ vi.mock('../../lib/queue', () => ({
   enqueuePaymentAlert: vi.fn().mockResolvedValue(null),
 }));
 
+// Mock the idempotency middleware so routes that call idempotencyHooks()
+// work without a live Redis connection.
+vi.mock('../../middleware/idempotency.middleware', () => ({
+  registerIdempotency: vi.fn().mockResolvedValue(undefined),
+  idempotencyHooks: () => ({
+    preValidation: [],
+    onSend: [],
+    onResponse: [],
+  }),
+  IDEMPOTENCY_HEADER: 'idempotency-key',
+}));
+
+// Mock Redis so the health/deep endpoint and any Redis-dependent code doesn't
+// try to connect to a real Redis instance.
+vi.mock('../../lib/redis', () => ({
+  redis: {
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue('OK'),
+    ping: vi.fn().mockResolvedValue('PONG'),
+    quit: vi.fn().mockResolvedValue(undefined),
+  },
+  checkRedisReadiness: vi.fn().mockResolvedValue(true),
+  getRedisStatus: vi.fn().mockReturnValue({ connected: true }),
+}));
+
 // ---------------------------------------------------------------------------
 
 import { buildApp } from '../../app';
@@ -100,5 +125,24 @@ describe('x-request-id correlation ID (Issue #44)', () => {
     const response = await app.inject({ method: 'GET', url: '/health' });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: 'ok' });
+  });
+
+  it('accepts a custom x-request-id and echoes it unchanged (Issue #567)', async () => {
+    // Verifies that Fastify is configured with requestIdHeader: 'x-request-id'
+    // so client-supplied trace IDs flow through to logs and responses.
+    const clientId = 'trace-id-567-verify';
+    const response = await app.inject({
+      method: 'GET',
+      url: '/health',
+      headers: { 'x-request-id': clientId },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-request-id']).toBe(clientId);
+  });
+
+  it('generates a valid UUID when no x-request-id header is present (Issue #567)', async () => {
+    const response = await app.inject({ method: 'GET', url: '/health' });
+    const id = response.headers['x-request-id'] as string;
+    expect(id).toMatch(UUID_V4_RE);
   });
 });
