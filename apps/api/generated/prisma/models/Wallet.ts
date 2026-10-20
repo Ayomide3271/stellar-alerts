@@ -45,6 +45,8 @@ export type WalletCountAggregateOutputType = {
   userId: number
   publicKey: number
   label: number
+  tags: number
+  metadata: number
   createdAt: number
   _all: number
 }
@@ -71,6 +73,8 @@ export type WalletCountAggregateInputType = {
   userId?: true
   publicKey?: true
   label?: true
+  tags?: true
+  metadata?: true
   createdAt?: true
   _all?: true
 }
@@ -152,6 +156,8 @@ export type WalletGroupByOutputType = {
   userId: string
   publicKey: string
   label: string | null
+  tags: string[]
+  metadata: runtime.JsonValue
   createdAt: Date
   _count: WalletCountAggregateOutputType | null
   _min: WalletMinAggregateOutputType | null
@@ -181,6 +187,8 @@ export type WalletWhereInput = {
   userId?: Prisma.StringFilter<"Wallet"> | string
   publicKey?: Prisma.StringFilter<"Wallet"> | string
   label?: Prisma.StringNullableFilter<"Wallet"> | string | null
+  tags?: Prisma.StringNullableListFilter<"Wallet">
+  metadata?: Prisma.JsonFilter<"Wallet">
   createdAt?: Prisma.DateTimeFilter<"Wallet"> | Date | string
   user?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
   payments?: Prisma.PaymentListRelationFilter
@@ -193,6 +201,8 @@ export type WalletOrderByWithRelationInput = {
   userId?: Prisma.SortOrder
   publicKey?: Prisma.SortOrder
   label?: Prisma.SortOrderInput | Prisma.SortOrder
+  tags?: Prisma.SortOrder
+  metadata?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   user?: Prisma.UserOrderByWithRelationInput
   payments?: Prisma.PaymentOrderByRelationAggregateInput
@@ -208,6 +218,8 @@ export type WalletWhereUniqueInput = Prisma.AtLeast<{
   NOT?: Prisma.WalletWhereInput | Prisma.WalletWhereInput[]
   userId?: Prisma.StringFilter<"Wallet"> | string
   label?: Prisma.StringNullableFilter<"Wallet"> | string | null
+  tags?: Prisma.StringNullableListFilter<"Wallet">
+  metadata?: Prisma.JsonFilter<"Wallet">
   createdAt?: Prisma.DateTimeFilter<"Wallet"> | Date | string
   user?: Prisma.XOR<Prisma.UserScalarRelationFilter, Prisma.UserWhereInput>
   payments?: Prisma.PaymentListRelationFilter
@@ -220,6 +232,8 @@ export type WalletOrderByWithAggregationInput = {
   userId?: Prisma.SortOrder
   publicKey?: Prisma.SortOrder
   label?: Prisma.SortOrderInput | Prisma.SortOrder
+  tags?: Prisma.SortOrder
+  metadata?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   _count?: Prisma.WalletCountOrderByAggregateInput
   _max?: Prisma.WalletMaxOrderByAggregateInput
@@ -234,6 +248,8 @@ export type WalletScalarWhereWithAggregatesInput = {
   userId?: Prisma.StringWithAggregatesFilter<"Wallet"> | string
   publicKey?: Prisma.StringWithAggregatesFilter<"Wallet"> | string
   label?: Prisma.StringNullableWithAggregatesFilter<"Wallet"> | string | null
+  tags?: Prisma.StringNullableListFilter<"Wallet">
+  metadata?: Prisma.JsonWithAggregatesFilter<"Wallet">
   createdAt?: Prisma.DateTimeWithAggregatesFilter<"Wallet"> | Date | string
 }
 
@@ -241,6 +257,8 @@ export type WalletCreateInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   user: Prisma.UserCreateNestedOneWithoutWalletsInput
   payments?: Prisma.PaymentCreateNestedManyWithoutWalletInput
@@ -253,6 +271,8 @@ export type WalletUncheckedCreateInput = {
   userId: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   payments?: Prisma.PaymentUncheckedCreateNestedManyWithoutWalletInput
   cursor?: Prisma.IngestionCursorUncheckedCreateNestedOneWithoutWalletInput
@@ -263,6 +283,8 @@ export type WalletUpdateInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   user?: Prisma.UserUpdateOneRequiredWithoutWalletsNestedInput
   payments?: Prisma.PaymentUpdateManyWithoutWalletNestedInput
@@ -275,6 +297,8 @@ export type WalletUncheckedUpdateInput = {
   userId?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   payments?: Prisma.PaymentUncheckedUpdateManyWithoutWalletNestedInput
   cursor?: Prisma.IngestionCursorUncheckedUpdateOneWithoutWalletNestedInput
@@ -286,6 +310,8 @@ export type WalletCreateManyInput = {
   userId: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
 }
 
@@ -293,6 +319,8 @@ export type WalletUpdateManyMutationInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
 }
 
@@ -301,6 +329,8 @@ export type WalletUncheckedUpdateManyInput = {
   userId?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
 }
 
@@ -314,11 +344,21 @@ export type WalletOrderByRelationAggregateInput = {
   _count?: Prisma.SortOrder
 }
 
+export type StringNullableListFilter<$PrismaModel = never> = {
+  equals?: string[] | Prisma.ListStringFieldRefInput<$PrismaModel> | null
+  has?: string | Prisma.StringFieldRefInput<$PrismaModel> | null
+  hasEvery?: string[] | Prisma.ListStringFieldRefInput<$PrismaModel>
+  hasSome?: string[] | Prisma.ListStringFieldRefInput<$PrismaModel>
+  isEmpty?: boolean
+}
+
 export type WalletCountOrderByAggregateInput = {
   id?: Prisma.SortOrder
   userId?: Prisma.SortOrder
   publicKey?: Prisma.SortOrder
   label?: Prisma.SortOrder
+  tags?: Prisma.SortOrder
+  metadata?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
 }
 
@@ -390,6 +430,15 @@ export type WalletUncheckedUpdateManyWithoutUserNestedInput = {
   deleteMany?: Prisma.WalletScalarWhereInput | Prisma.WalletScalarWhereInput[]
 }
 
+export type WalletCreatetagsInput = {
+  set: string[]
+}
+
+export type WalletUpdatetagsInput = {
+  set?: string[]
+  push?: string | string[]
+}
+
 export type WalletCreateNestedOneWithoutCursorInput = {
   create?: Prisma.XOR<Prisma.WalletCreateWithoutCursorInput, Prisma.WalletUncheckedCreateWithoutCursorInput>
   connectOrCreate?: Prisma.WalletCreateOrConnectWithoutCursorInput
@@ -438,6 +487,8 @@ export type WalletCreateWithoutUserInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   payments?: Prisma.PaymentCreateNestedManyWithoutWalletInput
   cursor?: Prisma.IngestionCursorCreateNestedOneWithoutWalletInput
@@ -448,6 +499,8 @@ export type WalletUncheckedCreateWithoutUserInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   payments?: Prisma.PaymentUncheckedCreateNestedManyWithoutWalletInput
   cursor?: Prisma.IngestionCursorUncheckedCreateNestedOneWithoutWalletInput
@@ -488,6 +541,8 @@ export type WalletScalarWhereInput = {
   userId?: Prisma.StringFilter<"Wallet"> | string
   publicKey?: Prisma.StringFilter<"Wallet"> | string
   label?: Prisma.StringNullableFilter<"Wallet"> | string | null
+  tags?: Prisma.StringNullableListFilter<"Wallet">
+  metadata?: Prisma.JsonFilter<"Wallet">
   createdAt?: Prisma.DateTimeFilter<"Wallet"> | Date | string
 }
 
@@ -495,6 +550,8 @@ export type WalletCreateWithoutCursorInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   user: Prisma.UserCreateNestedOneWithoutWalletsInput
   payments?: Prisma.PaymentCreateNestedManyWithoutWalletInput
@@ -506,6 +563,8 @@ export type WalletUncheckedCreateWithoutCursorInput = {
   userId: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   payments?: Prisma.PaymentUncheckedCreateNestedManyWithoutWalletInput
   alertRules?: Prisma.AlertRuleUncheckedCreateNestedManyWithoutWalletInput
@@ -531,6 +590,8 @@ export type WalletUpdateWithoutCursorInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   user?: Prisma.UserUpdateOneRequiredWithoutWalletsNestedInput
   payments?: Prisma.PaymentUpdateManyWithoutWalletNestedInput
@@ -542,6 +603,8 @@ export type WalletUncheckedUpdateWithoutCursorInput = {
   userId?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   payments?: Prisma.PaymentUncheckedUpdateManyWithoutWalletNestedInput
   alertRules?: Prisma.AlertRuleUncheckedUpdateManyWithoutWalletNestedInput
@@ -551,6 +614,8 @@ export type WalletCreateWithoutPaymentsInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   user: Prisma.UserCreateNestedOneWithoutWalletsInput
   cursor?: Prisma.IngestionCursorCreateNestedOneWithoutWalletInput
@@ -562,6 +627,8 @@ export type WalletUncheckedCreateWithoutPaymentsInput = {
   userId: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   cursor?: Prisma.IngestionCursorUncheckedCreateNestedOneWithoutWalletInput
   alertRules?: Prisma.AlertRuleUncheckedCreateNestedManyWithoutWalletInput
@@ -587,6 +654,8 @@ export type WalletUpdateWithoutPaymentsInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   user?: Prisma.UserUpdateOneRequiredWithoutWalletsNestedInput
   cursor?: Prisma.IngestionCursorUpdateOneWithoutWalletNestedInput
@@ -598,6 +667,8 @@ export type WalletUncheckedUpdateWithoutPaymentsInput = {
   userId?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   cursor?: Prisma.IngestionCursorUncheckedUpdateOneWithoutWalletNestedInput
   alertRules?: Prisma.AlertRuleUncheckedUpdateManyWithoutWalletNestedInput
@@ -607,6 +678,8 @@ export type WalletCreateWithoutAlertRulesInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   user: Prisma.UserCreateNestedOneWithoutWalletsInput
   payments?: Prisma.PaymentCreateNestedManyWithoutWalletInput
@@ -618,6 +691,8 @@ export type WalletUncheckedCreateWithoutAlertRulesInput = {
   userId: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
   payments?: Prisma.PaymentUncheckedCreateNestedManyWithoutWalletInput
   cursor?: Prisma.IngestionCursorUncheckedCreateNestedOneWithoutWalletInput
@@ -643,6 +718,8 @@ export type WalletUpdateWithoutAlertRulesInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   user?: Prisma.UserUpdateOneRequiredWithoutWalletsNestedInput
   payments?: Prisma.PaymentUpdateManyWithoutWalletNestedInput
@@ -654,6 +731,8 @@ export type WalletUncheckedUpdateWithoutAlertRulesInput = {
   userId?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   payments?: Prisma.PaymentUncheckedUpdateManyWithoutWalletNestedInput
   cursor?: Prisma.IngestionCursorUncheckedUpdateOneWithoutWalletNestedInput
@@ -663,6 +742,8 @@ export type WalletCreateManyUserInput = {
   id?: string
   publicKey: string
   label?: string | null
+  tags?: Prisma.WalletCreatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Date | string
 }
 
@@ -670,6 +751,8 @@ export type WalletUpdateWithoutUserInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   payments?: Prisma.PaymentUpdateManyWithoutWalletNestedInput
   cursor?: Prisma.IngestionCursorUpdateOneWithoutWalletNestedInput
@@ -680,6 +763,8 @@ export type WalletUncheckedUpdateWithoutUserInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   payments?: Prisma.PaymentUncheckedUpdateManyWithoutWalletNestedInput
   cursor?: Prisma.IngestionCursorUncheckedUpdateOneWithoutWalletNestedInput
@@ -690,6 +775,8 @@ export type WalletUncheckedUpdateManyWithoutUserInput = {
   id?: Prisma.StringFieldUpdateOperationsInput | string
   publicKey?: Prisma.StringFieldUpdateOperationsInput | string
   label?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  tags?: Prisma.WalletUpdatetagsInput | string[]
+  metadata?: Prisma.JsonNullValueInput | runtime.InputJsonValue
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
 }
 
@@ -738,6 +825,8 @@ export type WalletSelect<ExtArgs extends runtime.Types.Extensions.InternalArgs =
   userId?: boolean
   publicKey?: boolean
   label?: boolean
+  tags?: boolean
+  metadata?: boolean
   createdAt?: boolean
   user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   payments?: boolean | Prisma.Wallet$paymentsArgs<ExtArgs>
@@ -751,6 +840,8 @@ export type WalletSelectCreateManyAndReturn<ExtArgs extends runtime.Types.Extens
   userId?: boolean
   publicKey?: boolean
   label?: boolean
+  tags?: boolean
+  metadata?: boolean
   createdAt?: boolean
   user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["wallet"]>
@@ -760,6 +851,8 @@ export type WalletSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Extens
   userId?: boolean
   publicKey?: boolean
   label?: boolean
+  tags?: boolean
+  metadata?: boolean
   createdAt?: boolean
   user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
 }, ExtArgs["result"]["wallet"]>
@@ -769,10 +862,12 @@ export type WalletSelectScalar = {
   userId?: boolean
   publicKey?: boolean
   label?: boolean
+  tags?: boolean
+  metadata?: boolean
   createdAt?: boolean
 }
 
-export type WalletOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "userId" | "publicKey" | "label" | "createdAt", ExtArgs["result"]["wallet"]>
+export type WalletOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "userId" | "publicKey" | "label" | "tags" | "metadata" | "createdAt", ExtArgs["result"]["wallet"]>
 export type WalletInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   user?: boolean | Prisma.UserDefaultArgs<ExtArgs>
   payments?: boolean | Prisma.Wallet$paymentsArgs<ExtArgs>
@@ -800,6 +895,8 @@ export type $WalletPayload<ExtArgs extends runtime.Types.Extensions.InternalArgs
     userId: string
     publicKey: string
     label: string | null
+    tags: string[]
+    metadata: runtime.JsonValue
     createdAt: Date
   }, ExtArgs["result"]["wallet"]>
   composites: {}
@@ -1232,6 +1329,8 @@ export interface WalletFieldRefs {
   readonly userId: Prisma.FieldRef<"Wallet", 'String'>
   readonly publicKey: Prisma.FieldRef<"Wallet", 'String'>
   readonly label: Prisma.FieldRef<"Wallet", 'String'>
+  readonly tags: Prisma.FieldRef<"Wallet", 'String[]'>
+  readonly metadata: Prisma.FieldRef<"Wallet", 'Json'>
   readonly createdAt: Prisma.FieldRef<"Wallet", 'DateTime'>
 }
     

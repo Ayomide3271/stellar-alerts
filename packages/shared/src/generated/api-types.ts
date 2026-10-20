@@ -28,6 +28,7 @@ export interface components {
         CreateWalletInput: {
             publicKey: string;
             label?: string;
+            tags?: string[];
             zkProof?: unknown;
             publicSignals?: string[];
         };
