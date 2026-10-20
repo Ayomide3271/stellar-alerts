@@ -2,12 +2,23 @@
   "info": {
     "_postman_id": "86901d8d-960e-4ad2-b80c-b56cd9c59dc7",
     "name": "Stellar Alerts API",
-    "description": "Complete Postman collection for testing all endpoints in the Stellar Alerts API.",
+    "description": "Complete Postman collection for the Stellar Alerts Fastify API.\n\n## Quick start\n\n1. Set `{{baseUrl}}` (default `http://localhost:3001`).\n2. Run **Authentication → Magic Link → Verify Magic Link** (or **SEP-10 → Verify SEP-10 Challenge**). Its test script stores the access token in `{{jwtToken}}`.\n3. Every protected request inherits/sends `Authorization: Bearer {{jwtToken}}`.\n\n## What is covered\n\nAll routes registered by `apps/api/src/app.ts`: health, SSE, auth (magic link, DID, Telegram, SEP-10, refresh/logout, MFA), wallets and ingestion cursor status, payments, webhooks, alert rules, notification preferences and Telegram Mini App, dead letters and sandbox replays, exports, simulations, account lifecycle, GraphQL, Slack, Discord, and DLQ administration.\n\n## Variables\n\n`{{jwtToken}}` is the only credential you normally need to set by hand. IDs (`{{walletId}}`, `{{webhookId}}`, `{{alertRuleId}}`, `{{exportId}}`, `{{simulationId}}`, `{{deadLetterId}}`) are saved automatically by create/list requests when the API returns them.\n\nProvider callbacks need real signatures: Slack (`X-Slack-Signature`), Discord (`X-Signature-Ed25519`), and the Telegram Mini App (`X-Telegram-Init-Data`). Those headers intentionally use empty placeholders.\n\n## Notes\n\n- Mutation requests that support idempotency send an `Idempotency-Key` of `{{$guid}}`.\n- `GET /events` is an open SSE stream and will stay pending in Postman.\n- `GET /exports/:id/download` is authorized by its signed query pair, not a bearer token.\n",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{jwtToken}}",
+        "type": "string"
+      }
+    ]
   },
   "item": [
     {
-      "name": "Health",
+      "name": "Health & Realtime",
+      "description": "Liveness, deep dependency health, and the server-sent events stream. These endpoints are public.",
       "item": [
         {
           "name": "Health Check",
@@ -23,128 +34,944 @@
                 "health"
               ]
             },
-            "description": "Check if API server is running."
+            "description": "Liveness probe. Returns `{ \"status\": \"ok\" }` when the Fastify process is accepting requests.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
           },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Auth",
-      "item": [
-        {
-          "name": "Request Magic Link",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"user@example.com\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/auth/request-link",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "auth",
-                "request-link"
-              ]
-            },
-            "description": "Request a magic login link for an email address."
-          },
-          "response": []
-        },
-        {
-          "name": "Verify Magic Link",
+          "response": [],
           "event": [
             {
               "listen": "test",
               "script": {
+                "type": "text/javascript",
                 "exec": [
-                  "var jsonData = pm.response.json();",
-                  "if (jsonData.token) {",
-                  "    pm.collectionVariables.set(\"token\", jsonData.token);",
-                  "    console.log(\"Saved session token to variable:\", jsonData.token);",
-                  "}"
-                ],
-                "type": "text/javascript"
+                  "pm.test('status is ok', () => {",
+                  "  pm.expect(pm.response.json().status).to.eql('ok');",
+                  "});"
+                ]
               }
             }
-          ],
+          ]
+        },
+        {
+          "name": "Deep Health Check",
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/auth/verify?token={{magicToken}}",
+              "raw": "{{baseUrl}}/health/deep",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
-                "auth",
-                "verify"
-              ],
-              "query": [
-                {
-                  "key": "token",
-                  "value": "{{magicToken}}",
-                  "description": "JWT token received from console logs or email"
-                }
+                "health",
+                "deep"
               ]
             },
-            "description": "Verify magic link token and obtain session JWT token."
+            "description": "Checks PostgreSQL, Redis (BullMQ client), and the Soroban/Horizon RPC.\n\nReturns **200** when every dependency is `ok` and **503** with `status: \"degraded\"` when any check fails, so the response body is still inspectable during an incident.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Prometheus Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/metrics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "description": "Prometheus text exposition (queue depth, worker latency, active workers, process uptime, heap usage, and webhook dispatch histograms). Public endpoint used by monitoring scrapers.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Payment Events (SSE stream)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events"
+              ]
+            },
+            "description": "Server-Sent Events stream of payment events (`event: connected` immediately, then `event: payment` frames).\n\nThe connection is held open until the client disconnects, so Postman may show the request as pending — use the Postman console or a terminal `curl -N` to watch frames.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
           },
           "response": []
         }
       ]
     },
     {
-      "name": "Wallets",
+      "name": "Authentication",
+      "description": "Magic-link, DID, Telegram, SEP-10, rotating sessions, and MFA. The verify endpoints save the returned access token into `{{jwtToken}}` via their test scripts.",
+      "item": [
+        {
+          "name": "Magic Link",
+          "item": [
+            {
+              "name": "Request Magic Link",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/request-link",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "request-link"
+                  ]
+                },
+                "description": "Sends (or, in non-production, logs) a one-time magic-link token.\n\nIn development the response also includes the raw `token`; the test script stores it in `{{magicToken}}`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"user@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  if (typeof data.token === 'string' && data.token.length > 0) {",
+                      "    pm.collectionVariables.set('magicToken', data.token);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Verify Magic Link",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/verify?token={{magicToken}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "verify"
+                  ],
+                  "query": [
+                    {
+                      "key": "token",
+                      "value": "{{magicToken}}",
+                      "description": "Magic-link token from the API response (development) or from the delivered email."
+                    }
+                  ]
+                },
+                "description": "Exchanges a magic-link token for a session. Saves `{{jwtToken}}` and `{{refreshToken}}` for later requests.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  const token = data.token || data.accessToken;",
+                      "  if (typeof token === 'string' && token.length > 0) {",
+                      "    pm.collectionVariables.set('jwtToken', token);",
+                      "  }",
+                      "  if (typeof data.refreshToken === 'string' && data.refreshToken.length > 0) {",
+                      "    pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "DID & Telegram",
+          "item": [
+            {
+              "name": "Request DID Challenge",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/did/challenge",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "did",
+                    "challenge"
+                  ]
+                },
+                "description": "Starts wallet-based authentication by returning a challenge for a `did:pkh:stellar` identifier. The challenge expires after `DID_CHALLENGE_TTL_SECONDS`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"did\": \"did:pkh:stellar:testnet:GDX3I6LJUZNVV7UZVGXFNFXSWD7MTQ2KQ2UTRKQUOGKQUR2TQY6BBLLR\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  if (data.challenge) {",
+                      "    pm.collectionVariables.set('didChallenge', data.challenge);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Verify DID Signature",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/did/verify",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "did",
+                    "verify"
+                  ]
+                },
+                "description": "Verifies the wallet signature over the challenge and issues a session. Saves `{{jwtToken}}` when the response contains a token.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"did\": \"did:pkh:stellar:testnet:GDX3I6LJUZNVV7UZVGXFNFXSWD7MTQ2KQ2UTRKQUOGKQUR2TQY6BBLLR\",\n  \"challenge\": \"{{didChallenge}}\",\n  \"signature\": \"paste-base64-signature-of-the-challenge\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  const token = data.token || data.accessToken;",
+                      "  if (typeof token === 'string' && token.length > 0) {",
+                      "    pm.collectionVariables.set('jwtToken', token);",
+                      "  }",
+                      "  if (typeof data.refreshToken === 'string' && data.refreshToken.length > 0) {",
+                      "    pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Verify Telegram Init Data",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/telegram",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "telegram"
+                  ]
+                },
+                "description": "Authenticates a Telegram Mini App user by validating the signed `initData` string (HMAC-SHA256 against `TELEGRAM_BOT_TOKEN`). The payload must contain a `hash=` field.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"initData\": \"{{telegramInitData}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  const token = data.token || data.accessToken;",
+                      "  if (typeof token === 'string' && token.length > 0) {",
+                      "    pm.collectionVariables.set('jwtToken', token);",
+                      "  }",
+                      "  if (typeof data.refreshToken === 'string' && data.refreshToken.length > 0) {",
+                      "    pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "SEP-10",
+          "item": [
+            {
+              "name": "Get SEP-10 Challenge",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/sep10/challenge?publicKey={{stellarPublicKey}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "sep10",
+                    "challenge"
+                  ],
+                  "query": [
+                    {
+                      "key": "publicKey",
+                      "value": "{{stellarPublicKey}}",
+                      "description": "Client Stellar account public key (G...)."
+                    },
+                    {
+                      "key": "account",
+                      "value": "{{stellarPublicKey}}",
+                      "description": "Alias accepted for `publicKey`.",
+                      "disabled": true
+                    }
+                  ]
+                },
+                "description": "Returns a SEP-0010 challenge transaction envelope (`transaction` base64 XDR) plus the network passphrase. The test script stores the envelope in `{{sep10Transaction}}`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  if (data.transaction) {",
+                      "    pm.collectionVariables.set('sep10Transaction', data.transaction);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Verify SEP-10 Challenge",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/sep10/verify",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "sep10",
+                    "verify"
+                  ]
+                },
+                "description": "Verifies the client-signed challenge envelope, upserts the user/wallet, and returns session tokens. Saves `{{jwtToken}}` and `{{refreshToken}}`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"transaction\": \"{{sep10Transaction}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  const token = data.token || data.accessToken;",
+                      "  if (typeof token === 'string' && token.length > 0) {",
+                      "    pm.collectionVariables.set('jwtToken', token);",
+                      "  }",
+                      "  if (typeof data.refreshToken === 'string' && data.refreshToken.length > 0) {",
+                      "    pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Sessions",
+          "item": [
+            {
+              "name": "Refresh Session Tokens",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/refresh",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "refresh"
+                  ]
+                },
+                "description": "Rotates a refresh token and returns a new access token. Refresh tokens are single-use; reuse revokes the session family. Saves the new tokens into collection variables.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  const token = data.token || data.accessToken;",
+                      "  if (typeof token === 'string' && token.length > 0) {",
+                      "    pm.collectionVariables.set('jwtToken', token);",
+                      "  }",
+                      "  if (typeof data.refreshToken === 'string' && data.refreshToken.length > 0) {",
+                      "    pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Get Current User",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/me",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "me"
+                  ]
+                },
+                "description": "Returns the authenticated user profile.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Revoke Session Family",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/revoke-session",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "revoke-session"
+                  ]
+                },
+                "description": "Revokes the current token's session family. Leave `familyId` empty to revoke the family carried by the access token, or provide a family id to revoke another session.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"familyId\": \"\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Logout",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/logout",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "logout"
+                  ]
+                },
+                "description": "Revokes the current session and blocklists its JWT id. Clear or replace `{{jwtToken}}` afterwards.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "MFA",
+          "item": [
+            {
+              "name": "Setup MFA",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/setup",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "setup"
+                  ]
+                },
+                "description": "Generates a TOTP secret and QR code for the authenticated user. MFA is not active until `/auth/mfa/enable` succeeds.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Enable MFA",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/enable",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "enable"
+                  ]
+                },
+                "description": "Enables MFA after verifying a 6-digit TOTP token from the authenticator app. Returns one-time recovery codes.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"token\": \"123456\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Disable MFA",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/disable",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "disable"
+                  ]
+                },
+                "description": "Disables MFA. Requires a valid current TOTP token, not a recovery code.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"token\": \"123456\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get MFA Status",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "status"
+                  ]
+                },
+                "description": "Returns whether MFA is enabled plus the total and remaining recovery-code counts.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Generate Recovery Codes",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/recovery-codes",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "recovery-codes"
+                  ]
+                },
+                "description": "Generates a fresh set of one-time recovery codes, invalidating the previous set. Store them securely; they are shown only once.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Recovery Code Status",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/recovery-codes",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "recovery-codes"
+                  ]
+                },
+                "description": "Returns the total and remaining recovery-code counts without exposing the codes.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{jwtToken}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Recover Account",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/mfa/recover",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "mfa",
+                    "recover"
+                  ]
+                },
+                "description": "Lost-device recovery: consumes a one-time recovery code and issues a new session for the email. Rate limited and replay protected.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"user@example.com\",\n  \"recoveryCode\": \"ABCDE-12345\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": [],
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                      "  const data = pm.response.json();",
+                      "  const token = data.token || data.accessToken;",
+                      "  if (typeof token === 'string' && token.length > 0) {",
+                      "    pm.collectionVariables.set('jwtToken', token);",
+                      "  }",
+                      "  if (typeof data.refreshToken === 'string' && data.refreshToken.length > 0) {",
+                      "    pm.collectionVariables.set('refreshToken', data.refreshToken);",
+                      "  }",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Wallets & Ingestion",
+      "description": "Wallet registration, listing, ingestion cursor status, and deletion. All routes require a bearer token; mutations also accept `Idempotency-Key`.",
       "item": [
         {
           "name": "Add Wallet",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "var jsonData = pm.response.json();",
-                  "if (jsonData.wallet && jsonData.wallet.id) {",
-                  "    pm.collectionVariables.set(\"walletId\", jsonData.wallet.id);",
-                  "    console.log(\"Saved walletId to variable:\", jsonData.wallet.id);",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
           "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{token}}",
-                  "type": "string"
-                }
-              ]
-            },
             "method": "POST",
             "header": [
               {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"publicKey\": \"GDX3I6LJUZNVV7UZVGXFNFXSWD7MTQ2KQ2UTRKQUOGKQUR2TQY6BBLLR\",\n  \"label\": \"Main Trading Wallet\"\n}"
-            },
             "url": {
               "raw": "{{baseUrl}}/wallets",
               "host": [
@@ -154,53 +981,146 @@
                 "wallets"
               ]
             },
-            "description": "Add a new Stellar wallet to track (Requires Auth)."
-          },
-          "response": []
-        },
-        {
-          "name": "Get Wallets",
-          "request": {
+            "description": "Registers a Stellar wallet for ingestion. The public key must be a valid Ed25519 StrKey (G...) with a correct checksum. Saves the created id to `{{walletId}}` and the address to `{{stellarPublicKey}}`.\n\nSupports an optional `Idempotency-Key` header (1–255 chars, alphanumeric/underscore/hyphen).\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
             "auth": {
               "type": "bearer",
               "bearer": [
                 {
                   "key": "token",
-                  "value": "{{token}}",
+                  "value": "{{jwtToken}}",
                   "type": "string"
                 }
               ]
             },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"publicKey\": \"{{stellarPublicKey}}\",\n  \"label\": \"Main Trading Wallet\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.wallet && data.wallet.id) {",
+                  "    pm.collectionVariables.set('walletId', data.wallet.id);",
+                  "  }",
+                  "  if (data.wallet && data.wallet.publicKey) {",
+                  "    pm.collectionVariables.set('stellarPublicKey', data.wallet.publicKey);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Wallets",
+          "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/wallets",
+              "raw": "{{baseUrl}}/wallets?limit=20",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "wallets"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Page size (1–100)."
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "description": "Opaque cursor from `pagination.nextCursor`.",
+                  "disabled": true
+                }
               ]
             },
-            "description": "Get all tracked wallets for the logged in user (Requires Auth)."
+            "description": "Lists the authenticated user's wallets with cursor pagination. The test script stores the first wallet id in `{{walletId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.wallets) ? data.wallets : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('walletId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Wallet Ingestion Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wallets/{{walletId}}/ingestion-status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wallets",
+                "{{walletId}}",
+                "ingestion-status"
+              ]
+            },
+            "description": "Cursor status for a wallet: the last time the ingestion worker processed it and whether it is actively tracked. Use the id returned by **Add Wallet** or **List Wallets**.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
         {
           "name": "Delete Wallet",
           "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{token}}",
-                  "type": "string"
-                }
-              ]
-            },
             "method": "DELETE",
-            "header": [],
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
             "url": {
               "raw": "{{baseUrl}}/wallets/{{walletId}}",
               "host": [
@@ -211,7 +1131,17 @@
                 "{{walletId}}"
               ]
             },
-            "description": "Delete a tracked wallet by ID (Requires Auth)."
+            "description": "Deletes a tracked wallet and stops ingestion for it. Wallet-scoped alert rules and payments are removed by the cascade defined in the Prisma schema.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         }
@@ -219,14 +1149,15 @@
     },
     {
       "name": "Payments",
+      "description": "Payment history, summaries, and Soroban fee estimation. All routes require a bearer token.",
       "item": [
         {
-          "name": "Get Payments",
+          "name": "List Payments",
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/payments?walletId={{walletId}}&limit=20",
+              "raw": "{{baseUrl}}/payments?limit=20",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -236,15 +1167,70 @@
               "query": [
                 {
                   "key": "walletId",
-                  "value": "{{walletId}}"
+                  "value": "{{walletId}}",
+                  "description": "Optional wallet filter; omit to list across all wallets.",
+                  "disabled": true
                 },
                 {
                   "key": "limit",
-                  "value": "20"
+                  "value": "20",
+                  "description": "Page size (1–100)."
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "description": "Opaque cursor from `pagination.nextCursor`.",
+                  "disabled": true
+                },
+                {
+                  "key": "asset",
+                  "value": "USDC",
+                  "description": "Filter by asset code.",
+                  "disabled": true
+                },
+                {
+                  "key": "memo",
+                  "value": "invoice-001",
+                  "description": "Filter by memo text.",
+                  "disabled": true
+                },
+                {
+                  "key": "dateFrom",
+                  "value": "2026-01-01",
+                  "description": "Inclusive lower bound (ISO date or date-time).",
+                  "disabled": true
+                },
+                {
+                  "key": "dateTo",
+                  "value": "2026-12-31",
+                  "description": "Inclusive upper bound (ISO date or date-time).",
+                  "disabled": true
+                },
+                {
+                  "key": "sortBy",
+                  "value": "receivedAt",
+                  "description": "One of `receivedAt`, `amount`, `asset`.",
+                  "disabled": true
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc",
+                  "description": "`asc` or `desc`.",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Get payments for a specific wallet."
+            "description": "Returns the authenticated user's payments with cursor pagination and optional filters. The response is `{ success, payments, pagination }`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
           },
           "response": []
         },
@@ -254,7 +1240,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/payments/summary?walletId={{walletId}}",
+              "raw": "{{baseUrl}}/payments/summary",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -265,11 +1251,2286 @@
               "query": [
                 {
                   "key": "walletId",
-                  "value": "{{walletId}}"
+                  "value": "{{walletId}}",
+                  "description": "Optional wallet filter; omit for the aggregate across wallets.",
+                  "disabled": true
+                },
+                {
+                  "key": "fiat",
+                  "value": "USD",
+                  "description": "Fiat currency used for conversions (defaults to the API configuration).",
+                  "disabled": true
                 }
               ]
             },
-            "description": "Get payment summary and statistics for a specific wallet."
+            "description": "Returns aggregate payment statistics (totals, per-asset breakdown, conversion currency).\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Estimate Soroban Fee",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/payments/estimate-fee",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payments",
+                "estimate-fee"
+              ]
+            },
+            "description": "Simulates a Soroban transaction envelope and returns the inclusion fee, resource/rent fee, total fee in stroops and XLM, ledger footprints, and CPU/memory estimates.\n\nReturns **422** when the simulation fails; `details` explains why.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"xdrEnvelope\": \"AAAAAgAAAAB...base64-encoded Soroban TransactionEnvelope...\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "description": "Outbound webhook management, test delivery, and delivery logs. All routes require a bearer token; POST/DELETE accept `Idempotency-Key`.",
+      "item": [
+        {
+          "name": "Create Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks"
+              ]
+            },
+            "description": "Registers an HTTPS receiver for payment events. The receiver URL must be a valid URL (max 2048 chars). `payloadTemplate` is optional Handlebars JSON (max 16 KB) rendered with `{ event, timestamp, data: { paymentId, txHash, amount, asset, assetIssuer, fromAddress, receivedAt } }`. Saves the created id to `{{webhookId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com/stellar-alerts/webhook\",\n  \"payloadTemplate\": \"{\\\"event\\\":\\\"{{event}}\\\",\\\"timestamp\\\":\\\"{{timestamp}}\\\",\\\"txHash\\\":\\\"{{data.txHash}}\\\",\\\"amount\\\":\\\"{{data.amount}}\\\",\\\"asset\\\":\\\"{{data.asset}}\\\"}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.webhook && data.webhook.id) {",
+                  "    pm.collectionVariables.set('webhookId', data.webhook.id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Webhooks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks"
+              ]
+            },
+            "description": "Lists the authenticated user's webhook subscriptions. The test script stores the first id in `{{webhookId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.webhooks) ? data.webhooks : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('webhookId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Test Webhook",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/{{webhookId}}/test",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                "{{webhookId}}",
+                "test"
+              ]
+            },
+            "description": "Sends a synthetic delivery to the webhook receiver and returns the delivery result. This is intentionally not idempotency-cached because the whole point is to trigger a new send.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Webhook Delivery Logs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/{{webhookId}}/logs?limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                "{{webhookId}}",
+                "logs"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Page size (1–100)."
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "description": "Opaque cursor from `pagination.nextCursor`.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Returns delivery attempts for one webhook (status code, response body, error) with cursor pagination.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Webhook",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/{{webhookId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                "{{webhookId}}"
+              ]
+            },
+            "description": "Removes a webhook subscription and its delivery logs.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Alert Rules",
+      "description": "Alert rule CRUD, activation toggling, and legacy filter migration. All routes require a bearer token.",
+      "item": [
+        {
+          "name": "Create Alert Rule",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules"
+              ]
+            },
+            "description": "Creates a rule that matches incoming payments. All body fields are optional except the implied owner from the bearer token:\n\n- `walletId` — scope to one wallet; omit for all wallets\n- `assets` — asset codes; empty means any asset\n- `minAmount` / `maxAmount` — decimal strings\n- `channels` — e.g. `telegram`, `email`, `discord`, `slack`, `whatsapp`, `push`\n- `conditions` — optional `{ operator: \"AND\" | \"OR\", rules: [...] }` filter group\n\nSaves the created rule id to `{{alertRuleId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"walletId\": \"{{walletId}}\",\n  \"name\": \"Large incoming payment\",\n  \"assets\": [\n    \"XLM\",\n    \"USDC\"\n  ],\n  \"minAmount\": \"100\",\n  \"maxAmount\": \"10000\",\n  \"memo\": \"invoice\",\n  \"channels\": [\n    \"telegram\",\n    \"email\"\n  ],\n  \"conditions\": {\n    \"operator\": \"AND\",\n    \"rules\": [\n      {\n        \"field\": \"amount\",\n        \"operator\": \"gte\",\n        \"value\": 100\n      }\n    ]\n  },\n  \"isActive\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.rule && data.rule.id) {",
+                  "    pm.collectionVariables.set('alertRuleId', data.rule.id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Alert Rules",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules"
+              ],
+              "query": [
+                {
+                  "key": "isActive",
+                  "value": "true",
+                  "description": "Filter by active state (`true` / `false`).",
+                  "disabled": true
+                },
+                {
+                  "key": "walletId",
+                  "value": "{{walletId}}",
+                  "description": "Filter by wallet id.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Lists the authenticated user's alert rules. The test script stores the first id in `{{alertRuleId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.rules) ? data.rules : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('alertRuleId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Alert Rule",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules/{{alertRuleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules",
+                "{{alertRuleId}}"
+              ]
+            },
+            "description": "Returns one alert rule owned by the authenticated user.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Alert Rule",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules/{{alertRuleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules",
+                "{{alertRuleId}}"
+              ]
+            },
+            "description": "Updates an alert rule. Include `expectedVersion` for optimistic concurrency; a mismatch returns **409** `CONCURRENCY_CONFLICT`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Large incoming payment (updated)\",\n  \"minAmount\": \"250\",\n  \"channels\": [\n    \"telegram\",\n    \"email\",\n    \"discord\"\n  ],\n  \"isActive\": true,\n  \"expectedVersion\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Toggle Alert Rule",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules/{{alertRuleId}}/toggle",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules",
+                "{{alertRuleId}}",
+                "toggle"
+              ]
+            },
+            "description": "Enables or disables an alert rule without editing the rest of it.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Migrate Legacy Filter Rules",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules/migrate-legacy",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules",
+                "migrate-legacy"
+              ]
+            },
+            "description": "Converts legacy notification `filterRules` into an AlertRule. Returns `migrated: false` when there is nothing to migrate.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Alert Rule",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/alert-rules/{{alertRuleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-rules",
+                "{{alertRuleId}}"
+              ]
+            },
+            "description": "Permanently deletes an alert rule.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "description": "Notification preferences, freelancer channel setup, Telegram account linking, test pings, and the Telegram Mini App. Mini App routes authenticate with `X-Telegram-Init-Data`, not a bearer token.",
+      "item": [
+        {
+          "name": "Update Notification Preferences",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/preferences",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "preferences"
+              ]
+            },
+            "description": "Updates notification routing. `mfaToken` (6-digit TOTP) is required only when the user has MFA enabled. WhatsApp numbers must be E.164; Discord/Slack URLs must match their provider hostnames.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"telegramEnabled\": true,\n  \"emailEnabled\": true,\n  \"whatsappEnabled\": false,\n  \"whatsappNumber\": \"+14155551234\",\n  \"discordEnabled\": true,\n  \"discordWebhookUrl\": \"https://discord.com/api/webhooks/123456789012345678/example-token\",\n  \"slackEnabled\": false,\n  \"pushEnabled\": false,\n  \"enabledChannels\": [\n    \"telegram\",\n    \"email\",\n    \"discord\"\n  ],\n  \"assetFilters\": [\n    \"XLM\",\n    \"USDC\"\n  ],\n  \"minAmount\": 10,\n  \"receiptPreference\": \"instant\",\n  \"language\": \"EN\",\n  \"mfaToken\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Notification Preferences",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/preferences",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "preferences"
+              ]
+            },
+            "description": "Returns the authenticated user's notification preferences, or an empty object if none have been saved.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Freelancer Preferences",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/freelancer/preferences",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "freelancer",
+                "preferences"
+              ]
+            },
+            "description": "Freelancer-focused alias for updating channel setup. Returns the persisted preferences after the write.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"telegramEnabled\": true,\n  \"emailEnabled\": true,\n  \"enabledChannels\": [\n    \"telegram\",\n    \"email\"\n  ],\n  \"receiptPreference\": \"daily_digest\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Freelancer Preferences",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/freelancer/preferences",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "freelancer",
+                "preferences"
+              ]
+            },
+            "description": "Returns the same preference payload as `GET /notifications/preferences`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Generate Telegram Sync Code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/telegram/sync-code",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "telegram",
+                "sync-code"
+              ]
+            },
+            "description": "Creates a single-use Telegram linking code (15-minute TTL), a `t.me` deep link, and a QR code. Saves the code to `{{telegramSyncCode}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"walletAddress\": \"{{stellarPublicKey}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.code) {",
+                  "    pm.collectionVariables.set('telegramSyncCode', data.code);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm Telegram Sync",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/telegram/confirm-sync",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "telegram",
+                "confirm-sync"
+              ]
+            },
+            "description": "Called by the Telegram bot to consume the sync code and link the chat to the user. The code expires after 15 minutes and cannot be reused.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{telegramSyncCode}}\",\n  \"telegramChatId\": \"123456789\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Telegram Sync Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/telegram/sync-status/{{telegramSyncCode}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "telegram",
+                "sync-status",
+                "{{telegramSyncCode}}"
+              ]
+            },
+            "description": "Polls whether a sync code has been confirmed and by which chat. The status route lets the web UI finish linking without polling the bot.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Unlink Telegram",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/telegram/unlink",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "telegram",
+                "unlink"
+              ]
+            },
+            "description": "Removes the Telegram chat binding and disables Telegram notifications for the authenticated user.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Test Ping",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/test-ping",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "test-ping"
+              ]
+            },
+            "description": "Sends a one-off test notification on a configured channel (`telegram` or `push`) so the onboarding wizard can verify the link before activation.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"telegram\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Telegram Mini App",
+          "item": [
+            {
+              "name": "Get Mini App State",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "X-Telegram-Init-Data",
+                    "value": "{{telegramInitData}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/notifications/telegram/miniapp/state?feedLimit=20",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "notifications",
+                    "telegram",
+                    "miniapp",
+                    "state"
+                  ],
+                  "query": [
+                    {
+                      "key": "feedLimit",
+                      "value": "20",
+                      "description": "Maximum feed items to include (optional)."
+                    }
+                  ]
+                },
+                "description": "Bootstrap payload for the in-bot Mini App: notification routes, per-asset thresholds, and the live alert feed.\n\nAuthenticated by the signed `initData` in the `X-Telegram-Init-Data` header — there is no bearer token on this route.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Mini App Alert Feed",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "X-Telegram-Init-Data",
+                    "value": "{{telegramInitData}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/notifications/telegram/miniapp/feed?feedLimit=20",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "notifications",
+                    "telegram",
+                    "miniapp",
+                    "feed"
+                  ],
+                  "query": [
+                    {
+                      "key": "feedLimit",
+                      "value": "20",
+                      "description": "Maximum feed items to return (optional)."
+                    }
+                  ]
+                },
+                "description": "Returns only the live alert feed for the Telegram user. Requires `X-Telegram-Init-Data`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Toggle Mini App Route",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-Telegram-Init-Data",
+                    "value": "{{telegramInitData}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/notifications/telegram/miniapp/routes",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "notifications",
+                    "telegram",
+                    "miniapp",
+                    "routes"
+                  ]
+                },
+                "description": "Turns one notification route on or off from the Mini App. Valid routes: `telegram`, `email`, `whatsapp`, `discord`, `slack`, `push`. Requires `X-Telegram-Init-Data`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"route\": \"telegram\",\n  \"enabled\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Set Mini App Asset Threshold",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-Telegram-Init-Data",
+                    "value": "{{telegramInitData}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/notifications/telegram/miniapp/thresholds",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "notifications",
+                    "telegram",
+                    "miniapp",
+                    "thresholds"
+                  ]
+                },
+                "description": "Sets a per-asset minimum amount for Mini App alerts. Send `minAmount: null` to clear the threshold. Requires `X-Telegram-Init-Data`.\n\nPublic endpoint — no bearer token required.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"asset\": \"USDC\",\n  \"minAmount\": 25\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Dead Letters",
+      "description": "Dead-letter queue inspection, replay, suppression, and the webhook sandbox replay inspector. All routes require a bearer token; mutations accept `Idempotency-Key`.",
+      "item": [
+        {
+          "name": "List Dead Letters",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters?limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters"
+              ],
+              "query": [
+                {
+                  "key": "channel",
+                  "value": "telegram",
+                  "description": "Filter by delivery channel.",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "pending",
+                  "description": "Filter by `pending`, `retried`, or `suppressed`.",
+                  "disabled": true
+                },
+                {
+                  "key": "q",
+                  "value": "timeout",
+                  "description": "Free-text search over failure details.",
+                  "disabled": true
+                },
+                {
+                  "key": "maxAgeDays",
+                  "value": "30",
+                  "description": "Only include entries newer than this many days (1–365).",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Page size (1–100)."
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "description": "Opaque cursor from `pagination.nextCursor`.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Lists terminal delivery failures for the authenticated user. The test script stores the first id in `{{deadLetterId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.deadLetters) ? data.deadLetters : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('deadLetterId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Dead Letter",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters/{{deadLetterId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters",
+                "{{deadLetterId}}"
+              ]
+            },
+            "description": "Returns one dead letter with the original payload, failure class, and retry history.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Replay Dead Letter",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters/{{deadLetterId}}/replay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters",
+                "{{deadLetterId}}",
+                "replay"
+              ]
+            },
+            "description": "Re-enqueues the original delivery. Suppressed dead letters cannot be replayed (409).\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Suppress Dead Letter",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters/{{deadLetterId}}/suppress",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters",
+                "{{deadLetterId}}",
+                "suppress"
+              ]
+            },
+            "description": "Marks a dead letter as suppressed so it is excluded from retries. The optional note is stored for audit.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Receiver permanently retired\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Replay Into Webhook Sandbox",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters/{{deadLetterId}}/replay-sandbox",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters",
+                "{{deadLetterId}}",
+                "replay-sandbox"
+              ]
+            },
+            "description": "Replays the dead letter against the in-process mock receiver with a caller-chosen response (status 100–599, body up to 64 KB, up to 50 headers). Useful for exercising success and provider-error paths. Saves the inspection id to `{{sandboxReplayId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mockStatusCode\": 200,\n  \"mockResponseBody\": \"{\\\"ok\\\":true}\",\n  \"mockResponseHeaders\": {\n    \"Content-Type\": \"application/json\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.replay && data.replay.id) {",
+                  "    pm.collectionVariables.set('sandboxReplayId', data.replay.id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Sandbox Replays",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters/sandbox-replays?limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters",
+                "sandbox-replays"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Page size (1–100)."
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}",
+                  "description": "Opaque cursor from `pagination.nextCursor`.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Lists recorded sandbox/webhook-ping inspections for the authenticated user. The test script stores the first id in `{{sandboxReplayId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.items) ? data.items : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('sandboxReplayId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Sandbox Replay",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/dead-letters/sandbox-replays/{{sandboxReplayId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dead-letters",
+                "sandbox-replays",
+                "{{sandboxReplayId}}"
+              ]
+            },
+            "description": "Returns one sandbox inspection: request envelope/headers/body, mock response, timing, and verdict.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Exports",
+      "description": "Asynchronous ledger/tax export jobs. CRUD routes require a bearer token; the download link is authorized by its signed `expires`/`sig` query pair.",
+      "item": [
+        {
+          "name": "Create Export Job",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/exports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "exports"
+              ]
+            },
+            "description": "Queues an export job. `type` is one of `ledger_csv`, `ledger_pdf`, `tax_csv`; `format` (`cointracker`, `koinly`, `irs8949`) applies to `tax_csv`. Returns **202** with a `Location` header and saves the job id to `{{exportId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"ledger_csv\",\n  \"walletId\": \"{{walletId}}\",\n  \"periodStart\": \"2026-01-01\",\n  \"periodEnd\": \"2026-03-31\",\n  \"format\": \"cointracker\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.export && data.export.id) {",
+                  "    pm.collectionVariables.set('exportId', data.export.id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Export Jobs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/exports?page=1&pageSize=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "exports"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number (1–10000)."
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "description": "Items per page (1–100)."
+                }
+              ]
+            },
+            "description": "Lists export jobs newest first. The test script stores the first id in `{{exportId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.exports) ? data.exports : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('exportId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Export Job",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/exports/{{exportId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "exports",
+                "{{exportId}}"
+              ]
+            },
+            "description": "Returns one export job. A completed, unexpired job includes a freshly signed `download.url`; the test script splits its `expires` and `sig` parameters into `{{exportExpires}}` and `{{exportSig}}` for the download request.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const url = data.export && data.export.download && data.export.download.url;",
+                  "  if (typeof url === 'string') {",
+                  "    const expires = /[?&]expires=([^&]+)/.exec(url);",
+                  "    const sig = /[?&]sig=([^&]+)/.exec(url);",
+                  "    if (expires) pm.collectionVariables.set('exportExpires', expires[1]);",
+                  "    if (sig) pm.collectionVariables.set('exportSig', sig[1]);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Download Export File",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/exports/{{exportId}}/download?expires={{exportExpires}}&sig={{exportSig}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "exports",
+                "{{exportId}}",
+                "download"
+              ],
+              "query": [
+                {
+                  "key": "expires",
+                  "value": "{{exportExpires}}",
+                  "description": "Expiry timestamp from the signed download URL."
+                },
+                {
+                  "key": "sig",
+                  "value": "{{exportSig}}",
+                  "description": "HMAC signature from the signed download URL."
+                }
+              ]
+            },
+            "description": "Streams the generated file. The signed `expires`/`sig` pair is the credential, so this route deliberately does not use a bearer token. Unknown jobs and bad signatures both return 403.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Simulations",
+      "description": "Pre-execution transaction risk analysis. All routes require a bearer token.",
+      "item": [
+        {
+          "name": "Analyze Transaction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/simulations/analyze",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "simulations",
+                "analyze"
+              ]
+            },
+            "description": "Analyzes up to 1000 operations and returns a persisted risk assessment (SAFE/LOW/MODERATE/HIGH/CRITICAL) with indicators. Amounts are decimal strings. Rate limited to 20 requests per minute per client. Saves the assessment id to `{{simulationId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceAccount\": \"{{stellarPublicKey}}\",\n  \"network\": \"TESTNET\",\n  \"label\": \"Check payment to a new destination\",\n  \"operations\": [\n    {\n      \"kind\": \"pay\",\n      \"destination\": \"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF\",\n      \"asset\": {\n        \"type\": \"native\"\n      },\n      \"amount\": \"10\"\n    }\n  ],\n  \"preState\": [\n    {\n      \"accountId\": \"{{stellarPublicKey}}\",\n      \"nativeBalance\": \"100\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.simulation && data.simulation.id) {",
+                  "    pm.collectionVariables.set('simulationId', data.simulation.id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Simulations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/simulations?page=1&pageSize=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "simulations"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number (1–10000)."
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "description": "Items per page (1–100)."
+                },
+                {
+                  "key": "band",
+                  "value": "HIGH",
+                  "description": "Filter by risk band: SAFE, LOW, MODERATE, HIGH, CRITICAL.",
+                  "disabled": true
+                },
+                {
+                  "key": "sourceAccount",
+                  "value": "{{stellarPublicKey}}",
+                  "description": "Filter by source account.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Lists the authenticated user's simulation history. The test script stores the first id in `{{simulationId}}`.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  const list = Array.isArray(data.simulations) ? data.simulations : [];",
+                  "  if (list[0] && list[0].id) {",
+                  "    pm.collectionVariables.set('simulationId', list[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Simulation",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/simulations/{{simulationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "simulations",
+                "{{simulationId}}"
+              ]
+            },
+            "description": "Returns one persisted assessment. Responses are sent with `Cache-Control: no-store` because they encode security decisions.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Account",
+      "description": "Data export and irreversible account deletion for the authenticated user.",
+      "item": [
+        {
+          "name": "Export Account Data",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/account/export",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "account",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "format",
+                  "value": "csv",
+                  "description": "Send `csv` for a downloadable payment ledger; omit for the JSON payload.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Returns all data held about the authenticated user as JSON, including a `paymentsCsv` field. Add `?format=csv` for a `text/csv` attachment.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Account",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/account",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "account"
+              ]
+            },
+            "description": "**Irreversible.** Permanently deletes the user and cascades wallets, payments, webhooks, alert rules, preferences, and other owned rows. Returns a deletion summary so callers can verify what was removed. Clear local session storage afterwards.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Integrations",
+      "description": "GraphQL and provider callback endpoints. These routes do not use bearer auth; Discord and Slack verify provider signatures instead.",
+      "item": [
+        {
+          "name": "GraphQL Query",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/graphql",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "graphql"
+              ]
+            },
+            "description": "Apollo GraphQL endpoint (GET and POST are both mounted). The schema exposes `health` plus payment/Soroban/metrics subscriptions. This route has no bearer auth.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"{ health }\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code >= 200 && pm.response.code < 300) {",
+                  "  const data = pm.response.json();",
+                  "  pm.test('GraphQL response has no errors', () => {",
+                  "    pm.expect(data.errors, 'GraphQL errors').to.be.undefined;",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GraphQL Health (GET)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/graphql?query={ health }",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "graphql"
+              ],
+              "query": [
+                {
+                  "key": "query",
+                  "value": "{ health }",
+                  "description": "GraphQL query document."
+                }
+              ]
+            },
+            "description": "GET form of the GraphQL endpoint, useful for quick health checks and browser testing.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Slack Slash Command",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              },
+              {
+                "key": "X-Slack-Signature",
+                "value": "{{slackSignature}}"
+              },
+              {
+                "key": "X-Slack-Request-Timestamp",
+                "value": "{{slackTimestamp}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/slack/commands",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "slack",
+                "commands"
+              ]
+            },
+            "description": "Slack slash-command callback. Slack signs the raw urlencoded body; the API verifies `X-Slack-Signature` against `X-Slack-Request-Timestamp`, so placeholders must be replaced with a real signature inside Slack's 5-minute replay window.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "token",
+                  "value": "{{slackVerificationToken}}",
+                  "description": "Slack verification token.",
+                  "type": "text"
+                },
+                {
+                  "key": "team_id",
+                  "value": "T01234567",
+                  "description": "Slack workspace id.",
+                  "type": "text"
+                },
+                {
+                  "key": "team_domain",
+                  "value": "example",
+                  "description": "Slack workspace domain.",
+                  "type": "text"
+                },
+                {
+                  "key": "channel_id",
+                  "value": "C01234567",
+                  "description": "Channel where the command was invoked.",
+                  "type": "text"
+                },
+                {
+                  "key": "channel_name",
+                  "value": "alerts",
+                  "description": "Channel name.",
+                  "type": "text"
+                },
+                {
+                  "key": "user_id",
+                  "value": "U01234567",
+                  "description": "Invoking user id.",
+                  "type": "text"
+                },
+                {
+                  "key": "user_name",
+                  "value": "operator",
+                  "description": "Invoking username.",
+                  "type": "text"
+                },
+                {
+                  "key": "command",
+                  "value": "/stellar-alerts",
+                  "description": "Slash command.",
+                  "type": "text"
+                },
+                {
+                  "key": "text",
+                  "value": "status",
+                  "description": "Command arguments.",
+                  "type": "text"
+                },
+                {
+                  "key": "response_url",
+                  "value": "https://hooks.slack.com/commands/T01234567/123/abc",
+                  "description": "Slack response URL.",
+                  "type": "text"
+                },
+                {
+                  "key": "trigger_id",
+                  "value": "1234567890.1234567890.abcdef",
+                  "description": "Slack trigger id.",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Discord Interaction",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Signature-Ed25519",
+                "value": "{{discordSignature}}"
+              },
+              {
+                "key": "X-Signature-Timestamp",
+                "value": "{{discordTimestamp}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/integrations/discord/interactions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "integrations",
+                "discord",
+                "interactions"
+              ]
+            },
+            "description": "Discord interactions webhook. `type: 1` is an endpoint-verification PING without a real Ed25519 signature. Discord signs the raw body with `X-Signature-Ed25519` and `X-Signature-Timestamp`; the API rejects invalid signatures with 401.\n\nPublic endpoint — no bearer token required.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"1234567890\",\n  \"type\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "description": "Dead-letter queue administration. These routes are authenticated like user routes; restrict access at the gateway in production.",
+      "item": [
+        {
+          "name": "Inspect DLQ",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/dlq?limit=50&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "dlq"
+              ],
+              "query": [
+                {
+                  "key": "walletId",
+                  "value": "{{walletId}}",
+                  "description": "Filter by wallet id.",
+                  "disabled": true
+                },
+                {
+                  "key": "destination",
+                  "value": "telegram",
+                  "description": "Filter by destination.",
+                  "disabled": true
+                },
+                {
+                  "key": "channel",
+                  "value": "telegram",
+                  "description": "Filter by channel.",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "pending",
+                  "description": "Filter by status.",
+                  "disabled": true
+                },
+                {
+                  "key": "fromDate",
+                  "value": "2026-01-01",
+                  "description": "Inclusive lower bound.",
+                  "disabled": true
+                },
+                {
+                  "key": "toDate",
+                  "value": "2026-12-31",
+                  "description": "Inclusive upper bound.",
+                  "disabled": true
+                },
+                {
+                  "key": "failureClass",
+                  "value": "TIMEOUT",
+                  "description": "Filter by failure class.",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Page size."
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Offset for pagination."
+                }
+              ]
+            },
+            "description": "Inspects dead-letter entries with failure details and payload metadata. Use `limit`/`offset` for paging.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Replay DLQ Jobs",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/dlq/replay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "dlq",
+                "replay"
+              ]
+            },
+            "description": "Re-enqueues the selected dead-letter ids, or every entry matching `filter` when `ids` is omitted. Set `force` to replay even when a circuit breaker is open.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ids\": [\n    \"{{deadLetterId}}\"\n  ],\n  \"filter\": {\n    \"status\": \"pending\",\n    \"channel\": \"telegram\",\n    \"limit\": 50\n  },\n  \"force\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Purge DLQ Jobs",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/dlq/purge",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "dlq",
+                "purge"
+              ]
+            },
+            "description": "Permanently removes dead-letter entries older than `olderThanDays` (or `olderThanDate`) matching the optional status/channel filters.\n\nRequires `Authorization: Bearer {{jwtToken}}`.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{jwtToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"olderThanDays\": 30,\n  \"status\": \"failed\",\n  \"channel\": \"telegram\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": []
         }
@@ -280,22 +3541,146 @@
     {
       "key": "baseUrl",
       "value": "http://localhost:3001",
-      "type": "string"
+      "type": "string",
+      "description": "API origin. Change for staging or production."
+    },
+    {
+      "key": "jwtToken",
+      "value": "",
+      "type": "string",
+      "description": "Bearer token used by every authenticated request. Populated automatically by the verify/refresh requests, or paste one from GET /auth/me."
+    },
+    {
+      "key": "refreshToken",
+      "value": "",
+      "type": "string",
+      "description": "Rotating refresh token issued with the session."
     },
     {
       "key": "magicToken",
       "value": "",
-      "type": "string"
+      "type": "string",
+      "description": "One-time magic-link token (logged in non-production or delivered by email)."
     },
     {
-      "key": "token",
+      "key": "didChallenge",
       "value": "",
-      "type": "string"
+      "type": "string",
+      "description": "Challenge string returned by POST /auth/did/challenge."
+    },
+    {
+      "key": "sep10Transaction",
+      "value": "",
+      "type": "string",
+      "description": "Base64 XDR challenge from GET /auth/sep10/challenge."
+    },
+    {
+      "key": "telegramInitData",
+      "value": "",
+      "type": "string",
+      "description": "Signed Telegram Mini App initData (must include hash=). Used by the X-Telegram-Init-Data header."
+    },
+    {
+      "key": "stellarPublicKey",
+      "value": "GDX3I6LJUZNVV7UZVGXFNFXSWD7MTQ2KQ2UTRKQUOGKQUR2TQY6BBLLR",
+      "type": "string",
+      "description": "Valid Stellar Ed25519 public key used in wallet, SEP-10, and simulation samples."
     },
     {
       "key": "walletId",
       "value": "",
-      "type": "string"
+      "type": "string",
+      "description": "Wallet id, saved automatically when a wallet is created or listed."
+    },
+    {
+      "key": "webhookId",
+      "value": "",
+      "type": "string",
+      "description": "Webhook id, saved automatically when a webhook is created or listed."
+    },
+    {
+      "key": "alertRuleId",
+      "value": "",
+      "type": "string",
+      "description": "Alert rule id, saved automatically when a rule is created or listed."
+    },
+    {
+      "key": "deadLetterId",
+      "value": "",
+      "type": "string",
+      "description": "Dead-letter id (cuid) used by the dead-letter and admin requests."
+    },
+    {
+      "key": "sandboxReplayId",
+      "value": "",
+      "type": "string",
+      "description": "Webhook sandbox inspection id, saved after a sandbox replay."
+    },
+    {
+      "key": "exportId",
+      "value": "",
+      "type": "string",
+      "description": "Export job id, saved automatically when an export is created or listed."
+    },
+    {
+      "key": "exportExpires",
+      "value": "",
+      "type": "string",
+      "description": "Expiry from the signed export download URL (saved by Get Export Job)."
+    },
+    {
+      "key": "exportSig",
+      "value": "",
+      "type": "string",
+      "description": "Signature from the signed export download URL (saved by Get Export Job)."
+    },
+    {
+      "key": "simulationId",
+      "value": "",
+      "type": "string",
+      "description": "Simulation id, saved automatically when an analysis is created or listed."
+    },
+    {
+      "key": "telegramSyncCode",
+      "value": "",
+      "type": "string",
+      "description": "Single-use Telegram linking code, saved by Generate Telegram Sync Code."
+    },
+    {
+      "key": "cursor",
+      "value": "",
+      "type": "string",
+      "description": "Opaque pagination cursor from a `pagination.nextCursor` response field."
+    },
+    {
+      "key": "slackSignature",
+      "value": "",
+      "type": "string",
+      "description": "X-Slack-Signature for the signed slash-command payload."
+    },
+    {
+      "key": "slackTimestamp",
+      "value": "",
+      "type": "string",
+      "description": "X-Slack-Request-Timestamp (Unix seconds) used in the Slack signature."
+    },
+    {
+      "key": "slackVerificationToken",
+      "value": "",
+      "type": "string",
+      "description": "Slack app verification token."
+    },
+    {
+      "key": "discordSignature",
+      "value": "",
+      "type": "string",
+      "description": "X-Signature-Ed25519 from Discord for the raw interaction body."
+    },
+    {
+      "key": "discordTimestamp",
+      "value": "",
+      "type": "string",
+      "description": "X-Signature-Timestamp from Discord for the raw interaction body."
     }
   ]
 }
