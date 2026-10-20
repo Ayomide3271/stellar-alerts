@@ -1,0 +1,33 @@
+{
+  "default_branch": "contribution",
+  "branches": [
+    "contribution",
+    "dependabot/github_actions/dot-github/workflows/github-actions-2a864e7a63",
+    "dependabot/npm_and_yarn/npm-dependencies-15c5b63517",
+    "feat/dashboard-componentization",
+    "feat/phase-2-core-engine",
+    "fix/566-deep-health-probe",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "contribution": null,
+    "dependabot/github_actions/dot-github/workflows/github-actions-2a864e7a63": "contribution",
+    "dependabot/npm_and_yarn/npm-dependencies-15c5b63517": "contribution",
+    "feat/dashboard-componentization": "contribution",
+    "feat/phase-2-core-engine": "contribution",
+    "fix/566-deep-health-probe": "contribution",
+    "main": "contribution",
+    "origin": "contribution"
+  },
+  "order": [
+    "contribution",
+    "dependabot/github_actions/dot-github/workflows/github-actions-2a864e7a63",
+    "dependabot/npm_and_yarn/npm-dependencies-15c5b63517",
+    "feat/dashboard-componentization",
+    "feat/phase-2-core-engine",
+    "fix/566-deep-health-probe",
+    "main",
+    "origin"
+  ]
+}
