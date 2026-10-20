@@ -28,6 +28,7 @@ import { slackRoutes } from './modules/slack/slack.routes';
 import { graphqlRoutes } from './modules/graphql/graphql.routes';
 import { exportsRoutes } from './modules/exports/exports.routes';
 import { simulationRoutes } from './modules/simulation/simulation.routes';
+import { adminRoutes } from './modules/admin/admin.routes';
 import { openApiOptions } from './openapi.config';
 import { loggerOptions } from './lib/logger';
 import { env } from './config/env';
@@ -147,7 +148,7 @@ await app.register(graphqlRoutes);
   app.register(exportsRoutes);
   app.register(simulationRoutes);
   app.register(discordInteractionsRoutes);
-  app.register(sorobanStateRoutes);
+  app.register(adminRoutes);
 
   return app;
 };
