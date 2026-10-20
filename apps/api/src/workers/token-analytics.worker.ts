@@ -7,6 +7,7 @@ import {
   parseSorobanMintBurnEvent,
   ParsedSorobanMintBurn,
   loadContractRegistry,
+  withSacDecimals,
 } from '../lib/soroban';
 import { registerSupervisorHeartbeat } from './supervisor';
 
@@ -86,7 +87,8 @@ async function processContract(contractId: string): Promise<void> {
     for (const event of batch) {
       const parsed = parseSorobanMintBurnEvent(event);
       if (parsed && parsed.ledgerSeq) {
-        await processMintBurn(parsed);
+        // Use the token's real decimals rather than the 7-decimal default.
+        await processMintBurn(await withSacDecimals(parsed));
       }
     }
   }

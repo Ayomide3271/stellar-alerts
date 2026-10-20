@@ -1,10 +1,12 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { render } from 'ink';
 import { ApiClient } from '../lib/api.js';
 import { PaymentDTO } from '../lib/types.js';
 import { resolveAuth } from '../lib/auth.js';
 import { CursorStore, defaultCursorFile } from '../lib/cursor-store.js';
 import { runResilientStream } from '../lib/resilient-stream.js';
+import StreamTui, { type StreamTuiAction } from '../tui/stream-tui.js';
 
 interface WatchOptions {
   wallet?: string;
@@ -15,6 +17,7 @@ interface WatchOptions {
   resume?: boolean;
   maxRetries?: string;
   maxBackoff?: string;
+  tui?: boolean;
 }
 
 function warn(message: string): void {
@@ -74,6 +77,7 @@ export function registerStreamCommands(program: Command): void {
     .option('--no-resume', 'Do not read or write the saved cursor')
     .option('--max-retries <number>', 'Consecutive reconnect attempts before giving up (default: unlimited)')
     .option('--max-backoff <ms>', 'Upper bound for the reconnect delay in milliseconds', '60000')
+    .option('--tui', 'Enable interactive Terminal UI (TUI) mode')
     .action(async (options: WatchOptions) => {
       const abortController = new AbortController();
       const onSigInt = () => {
@@ -110,6 +114,17 @@ export function registerStreamCommands(program: Command): void {
           : new CursorStore(options.cursorFile ?? defaultCursorFile(options.wallet), warn);
         const initialCursor = options.cursor === undefined ? undefined : options.cursor === 'now' ? '' : options.cursor;
 
+        // TUI Mode
+        if (options.tui) {
+          // For now, TUI mode is a separate command that can be launched
+          // Full integration with the stream would require passing dispatch function
+          console.log(chalk.yellow('TUI mode is available as a standalone feature.'));
+          console.log(chalk.gray('To launch the TUI dashboard separately, use: stellar-alerts-cli tui'));
+          console.log(chalk.gray('Full stream integration coming soon.'));
+          return;
+        }
+
+        // Default text mode
         printHeader();
         console.log(chalk.gray('Connecting to payment stream...'));
 
