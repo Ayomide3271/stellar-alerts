@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -164,6 +164,80 @@ test('staged and commit-range scans fail without printing a detected value', () 
     assert.equal(history.status, 1);
     assert.match(history.stderr, /Stellar secret seed/);
     assert.equal(history.stderr.includes(secret), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Stellar seed boundaries reject short, long, public and invalid-base32 keys', () => {
+  const lines = [
+    'S' + 'A'.repeat(54), 'S' + 'A'.repeat(56), 'G' + 'A'.repeat(55),
+    'S' + 'A'.repeat(54) + '0', 'prefixS' + 'A'.repeat(55),
+    'S' + 'A'.repeat(55),
+  ];
+  assert.deepEqual(findSecretsInPatch(patchFor('keys.txt', lines)), [
+    { kind: 'Stellar secret seed', file: 'keys.txt', line: 6 },
+  ]);
+});
+
+test('JWT literals are sensitive even without digits; placeholders and references are safe', () => {
+  const patch = patchFor('config.env', [
+    'JWT_SECRET=alphabeticSigningSecret',
+    'const jwtSecret = "alphabetic-signing-secret"; // signing key',
+    `JWT_SIGNING_KEY="${'another-' + 'signing-secret'}" # local setting`,
+    'JWT_SECRET=${JWT_SECRET}',
+    'const jwtSecret = process.env.JWT_SECRET;',
+    'JWT_SECRET=your-placeholder-secret',
+  ]);
+  assert.deepEqual(findSecretsInPatch(patch), [1, 2, 3].map(line => ({
+    kind: 'sensitive assignment', file: 'config.env', line,
+  })));
+});
+
+test('local entry point scans the index, blocks the real hook, and permits --no-verify', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'stellar-staged-hook-'));
+  const source = fileURLToPath(new URL('../', import.meta.url));
+  const secret = 'S' + 'B'.repeat(55);
+  const git = (...args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const scan = () => spawnSync(process.execPath, ['scripts/scan-staged-secrets.mjs'], { cwd: directory, encoding: 'utf8' });
+  try {
+    for (const name of ['tools', 'scripts', '.husky']) mkdirSync(path.join(directory, name));
+    for (const name of ['tools/check-secrets.mjs', 'scripts/scan-staged-secrets.mjs', '.husky/pre-commit']) {
+      copyFileSync(path.join(source, name), path.join(directory, name));
+    }
+    chmodSync(path.join(directory, '.husky/pre-commit'), 0o755);
+    git('init', '-q');
+    git('config', 'user.name', 'Test');
+    git('config', 'user.email', 'test@example.test');
+    // Husky's generated runner invokes the checked-in hook through sh.
+    mkdirSync(path.join(directory, '.husky', '_'));
+    writeFileSync(path.join(directory, '.husky', '_', 'pre-commit'), '#!/bin/sh\nexec sh .husky/pre-commit\n');
+    chmodSync(path.join(directory, '.husky', '_', 'pre-commit'), 0o755);
+    git('config', 'core.hooksPath', '.husky/_');
+    writeFileSync(path.join(directory, 'config.env'), 'SAFE=true\n');
+    git('add', 'config.env');
+    git('commit', '--no-verify', '-qm', 'baseline');
+    writeFileSync(path.join(directory, 'config.env'), `SECRET=${secret}\n`);
+    assert.equal(scan().status, 0, 'unstaged secrets must not be scanned');
+    git('add', 'config.env');
+    writeFileSync(path.join(directory, 'config.env'), 'SAFE=true\n');
+    const staged = scan();
+    assert.equal(staged.status, 1, 'working tree cleanup does not clean the index');
+    assert.match(staged.stderr, /stage the corrected file again/);
+    assert.equal(staged.stderr.includes(secret), false);
+    const blocked = spawnSync('git', ['commit', '-qm', 'blocked'], { cwd: directory, encoding: 'utf8' });
+    assert.notEqual(blocked.status, 0);
+    assert.match(blocked.stderr, /Commit blocked/);
+    assert.equal(blocked.stderr.includes(secret), false);
+    git('commit', '--no-verify', '-qm', 'intentional synthetic fixture');
+    git('add', 'config.env');
+    assert.equal(scan().status, 0, 'secret removal must be allowed');
+    const durations = Array.from({ length: 5 }, () => {
+      const start = performance.now();
+      assert.equal(scan().status, 0);
+      return performance.now() - start;
+    }).sort((a, b) => a - b);
+    console.log(`Staged scanner latency (5 runs): median=${durations[2].toFixed(1)}ms max=${durations[4].toFixed(1)}ms`);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
