@@ -84,6 +84,7 @@ function parseRetryAfterMs(headers: Headers | undefined): number | undefined {
  * Sends a WhatsApp payment-receipt alert via the Twilio WhatsApp API, with
  * exponential-backoff retries on rate limits (429) and server errors (5xx).
  */
+// PR placeholder for issue #562 – WhatsApp alert dispatch
 export async function dispatchWhatsAppAlert(
   phoneNumber: string,
   data: WhatsAppAlertData,
