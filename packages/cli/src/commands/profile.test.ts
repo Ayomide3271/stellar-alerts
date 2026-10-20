@@ -97,6 +97,8 @@ describe('profile commands – registration', () => {
     const program = makeProgram();
     const listCmd = findCmd(program, 'profile', 'list');
     expect(listCmd.description()).toBe('List all configuration profiles');
+    const jsonOption = listCmd.options.find((o) => o.long === '--json');
+    expect(jsonOption).toBeDefined();
   });
 
   it('registers "profile use" subcommand', () => {
@@ -257,6 +259,19 @@ describe('profile commands – actions', () => {
     // Should have logged something with the profile name
     const allLogs = consoleSpy.mock.calls.flat().join(' ');
     expect(allLogs).toContain('testnet');
+  });
+
+  it('profile list: outputs JSON when --json flag is passed', async () => {
+    vi.mocked(profileStore.listProfiles).mockReturnValue([mockProfile]);
+
+    const program = makeProgram();
+    await program.parseAsync(['profile', 'list', '--json'], { from: 'user' });
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      JSON.stringify([mockProfile], null, 2),
+    );
+    const parsed = JSON.parse(consoleSpy.mock.calls[0][0]);
+    expect(parsed).toEqual([mockProfile]);
   });
 
   // ── profile use ──
