@@ -5,7 +5,7 @@ import chalk from 'chalk';
 import { render } from 'ink';
 import { registerWalletCommands } from './commands/wallet.js';
 import { registerStreamCommands } from './commands/stream.js';
-import { registerProfileCommands } from './commands/profile.js';
+import { registerProfileCommands } from './commands/profile.js';\nimport { registerStatusCommands } from './commands/status.js';
 import StreamTui from './tui/stream-tui.js';
 
 const program = new Command();
@@ -23,7 +23,7 @@ program
 // Register command groups
 registerWalletCommands(program);
 registerStreamCommands(program);
-registerProfileCommands(program);
+registerProfileCommands(program);\nregisterStatusCommands(program);
 
 // Health check command
 program
