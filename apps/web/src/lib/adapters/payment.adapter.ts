@@ -5,7 +5,7 @@
  * Each method represents a single RPC round-trip.
  */
 
-import { PaymentDTO } from '@stellar-alerts/shared';
+import { PaymentDTO, paymentDTOSchema } from '@stellar-alerts/shared';
 import { ApiAdapter } from './api.adapter';
 
 export interface GetPaymentsResponse {
@@ -55,7 +55,7 @@ export class PaymentAdapter extends ApiAdapter {
     const query = params.toString();
     const endpoint = query ? `/payments?${query}` : '/payments';
     const response = await this.get<GetPaymentsResponse>(endpoint);
-    return response.payments;
+    return paymentDTOSchema.array().parse(response.payments);
   }
 
   async getPaymentsSummary(): Promise<{

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { isValidEd25519PublicKey } from './strkey';
 
 // Generated from the API's OpenAPI schema — see scripts/generate-types.ts.
@@ -10,30 +11,41 @@ export * from './merkle';
 // (Ed25519 public keys, contract IDs, muxed addresses, transaction hashes).
 export * from './strkey';
 
-export interface UserDTO {
-  id: string;
-  email: string;
-  createdAt: Date | string;
-}
+const dateDTO = z.union([z.date(), z.string()]);
 
-export interface WalletDTO {
-  id: string;
-  userId: string;
-  publicKey: string;
-  label?: string | null;
-  createdAt: Date | string;
-}
+export const userDTOSchema = z
+  .object({
+    id: z.string(),
+    email: z.string(),
+    createdAt: dateDTO,
+  })
+  .passthrough();
+export type UserDTO = z.infer<typeof userDTOSchema>;
 
-export interface PaymentDTO {
-  id: string;
-  walletId: string;
-  txHash: string;
-  fromAddress: string;
-  amount: number | string;
-  asset: string;
-  memo?: string | null;
-  receivedAt: Date | string;
-}
+export const walletDTOSchema = z
+  .object({
+    id: z.string(),
+    userId: z.string(),
+    publicKey: z.string(),
+    label: z.string().nullable().optional(),
+    createdAt: dateDTO,
+  })
+  .passthrough();
+export type WalletDTO = z.infer<typeof walletDTOSchema>;
+
+export const paymentDTOSchema = z
+  .object({
+    id: z.string(),
+    walletId: z.string(),
+    txHash: z.string(),
+    fromAddress: z.string(),
+    amount: z.union([z.number(), z.string()]),
+    asset: z.string(),
+    memo: z.string().nullable().optional(),
+    receivedAt: dateDTO,
+  })
+  .passthrough();
+export type PaymentDTO = z.infer<typeof paymentDTOSchema>;
 
 export interface DeliveryEventDTO {
   id: string;
@@ -103,4 +115,3 @@ export function extractAvailableAssets(payments: PaymentDTO[]): string[] {
   });
   return ['ALL', ...Array.from(assets).sort()];
 }
-
