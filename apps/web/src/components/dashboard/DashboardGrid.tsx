@@ -49,9 +49,16 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
     }
   }, [order, storageKey]);
 
-  const orderedItems = order
-    .map((id) => items.find((item) => item.id === id))
-    .filter((item): item is DashboardWidgetItem => Boolean(item));
+  // `order` is captured on mount, but `items` can grow afterwards (the wallets
+  // widget only exists once the user has one). Anything the stored order does
+  // not know about is appended, in the order the caller supplied it, rather
+  // than being silently dropped from the dashboard.
+  const orderedItems = [
+    ...order
+      .map((id) => items.find((item) => item.id === id))
+      .filter((item): item is DashboardWidgetItem => Boolean(item)),
+    ...items.filter((item) => !order.includes(item.id)),
+  ];
 
   const handleDragStart =
     (index: number) =>
@@ -79,9 +86,10 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
         setOverIndex(null);
         return;
       }
-      setOrder((prev) => {
-        const next = [...prev];
+      setOrder(() => {
+        const next = orderedItems.map((item) => item.id);
         const [moved] = next.splice(sourceIndex, 1);
+        if (!moved) return next;
         next.splice(index, 0, moved);
         return next;
       });
