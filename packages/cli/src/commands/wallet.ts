@@ -38,13 +38,19 @@ export function registerWalletCommands(program: Command): void {
   wallet
     .command('list')
     .description('List all watched wallets')
+    .option('--json', 'Output results in JSON format')
     .option('-t, --token <token>', 'API authentication token (overrides profile)')
-    .action(async (options: { token?: string }) => {
+    .action(async (options: { token?: string; json?: boolean }) => {
       try {
         const auth = resolveAuth(options.token, program.opts().apiUrl);
         const client = new ApiClient(auth.apiUrl, auth.token);
 
         const wallets = await client.getWallets();
+
+        if (options.json) {
+          console.log(JSON.stringify(wallets, null, 2));
+          return;
+        }
 
         if (wallets.length === 0) {
           console.log(chalk.yellow('📭 No wallets found. Add one with: stellar-alerts-cli wallet add <publicKey>'));
