@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { authenticateHook } from '../../middleware/auth.middleware';
 import { idempotencyHooks } from '../../middleware/idempotency.middleware';
 import { walletsController } from './wallets.controller';
+import { exportController } from './export.controller';
 
 export async function walletsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticateHook);
@@ -17,6 +18,7 @@ export async function walletsRoutes(app: FastifyInstance) {
   );
   app.get('/wallets', walletsController.getWallets.bind(walletsController));
   app.get('/wallets/:id/ingestion-status', walletsController.getIngestionStatus.bind(walletsController));
+  app.get('/wallets/:id/export', exportController.exportWallet.bind(exportController));
   app.delete(
     '/wallets/:id',
     { preValidation: idempotent.preValidation, onSend: idempotent.onSend, onResponse: idempotent.onResponse },
