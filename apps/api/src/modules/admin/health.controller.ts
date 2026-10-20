@@ -1,26 +1,34 @@
 import { FastifyReply, FastifyRequest } from 'fastify';
-import { dbHealthService } from '../maintenance/db-health.service';
+import { DbHealthService, DbHealthReport } from '../../lib/db-health';
 
 export class HealthController {
-  async dbHealth(request: FastifyRequest, reply: FastifyReply) {
+  private readonly service: DbHealthService;
+
+  constructor(service: DbHealthService = new DbHealthService(true)) {
+    this.service = service;
+  }
+
+  /**
+   * GET /admin/health/db
+   * Returns a structured diagnostic report covering index bloat, dead tuples, and cache hit ratios.
+   * Runs using read-only system stat views against the reading client.
+   */
+  dbhealth = async (
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> => {
     try {
-      const report = await dbHealthService.generateReport();
-      return reply.status(200).send({
-        success: true,
-        data: report,
-      });
+      const report: DbHealthReport = await this.service.generateReport();
+      reply.code(200).send({ success: true, data: report });
     } catch (error) {
-      request.log.error({
-        err: error,
-        msg: 'DbHealthService report generation failed',
-      });
-      return reply.status(503).send({
+      request.log.error({ err: error }, 'Failed to generate DB health report');
+      reply.code(503).send({
         success: false,
-        error: 'DB_HEATH_UNAVAILABLE',
+        error: 'DB_HEALTH_REPORT_FAILED',
         message: (error as Error).message,
       });
     }
-  }
+  };
 }
 
 export const healthController = new HealthController();
