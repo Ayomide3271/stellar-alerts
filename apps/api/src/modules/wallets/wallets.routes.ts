@@ -24,4 +24,10 @@ export async function walletsRoutes(app: FastifyInstance) {
     { preValidation: idempotent.preValidation, onSend: idempotent.onSend, onResponse: idempotent.onResponse },
     walletsController.deleteWallet.bind(walletsController)
   );
-}
+
+  app.post(
+    '/wallets/bulk-import',
+    { preValidation: idempotent.preValidation, onSend: idempotent.onSend, onResponse: idempotent.onResponse },
+    walletsController.bulkImport.bind(walletsController)
+  );
+\n}
