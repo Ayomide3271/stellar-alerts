@@ -153,7 +153,7 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-8">
       {/* Live webhook delivery toast (populated over the authenticated WebSocket) */}
       {latestDelivery && (
         <div
@@ -172,14 +172,14 @@ export default function DashboardPage() {
       )}
 
       {/* Header Banner */}
-      <div className="p-8 rounded-3xl bg-gradient-to-r from-cyan-950/40 via-blue-950/30 to-purple-950/20 border border-cyan-500/20 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative overflow-hidden">
+      <div className="p-5 sm:p-8 rounded-3xl bg-gradient-to-r from-cyan-950/40 via-blue-950/30 to-purple-950/20 border border-cyan-500/20 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 relative overflow-hidden">
         <div className="absolute top-0 right-0 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl -mr-32 -mt-32 pointer-events-none"></div>
         <div>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold mb-3">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
             Watcher Service Active
           </div>
-          <h1 className="text-3xl font-extrabold text-white tracking-tight">Your Real-Time Wallet Dashboard</h1>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">Your Real-Time Wallet Dashboard</h1>
           <p className="text-gray-400 text-sm mt-1 max-w-xl">
             Monitor connected Stellar Testnet addresses, track live incoming transactions, and export recorded payment history.
           </p>
@@ -246,11 +246,11 @@ export default function DashboardPage() {
             id: 'watcher-and-payments',
             label: 'Watcher & Payment Ledger',
             content: (
-              <div id="add-wallet-section" className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                <div className="lg:col-span-4 bg-[#0c0c14]/80 backdrop-blur-md rounded-3xl border border-white/10 p-7 shadow-2xl hover:border-cyan-500/30 transition-all duration-500">
+              <div id="add-wallet-section" className="min-w-0 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                <div className="min-w-0 lg:col-span-4 bg-[#0c0c14]/80 backdrop-blur-md rounded-3xl border border-white/10 p-7 shadow-2xl hover:border-cyan-500/30 transition-all duration-500">
                   <WatcherForm onWalletAdded={refreshAfterMutation} isStreamConnected={isStreamConnected} />
                 </div>
-                <div className="lg:col-span-8">
+                <div className="min-w-0 lg:col-span-8">
                   <PaymentTable payments={payments} isLoading={isLoadingPayments} />
                 </div>
               </div>
