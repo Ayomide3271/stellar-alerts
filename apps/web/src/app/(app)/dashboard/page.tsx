@@ -12,6 +12,7 @@ import {
   VolumeChart,
   WebhookSandbox,
   WalletList,
+  EmptyWatchersState,
   PaymentTable,
   ActivityHeatmap,
   EmailTemplatePreview,
@@ -32,6 +33,9 @@ export default function DashboardPage() {
   const [selectedWalletId, setSelectedWalletId] = useState<string | null>(null);
   const [payments, setPayments] = useState<PaymentDTO[]>([]);
   const [isLoadingPayments, setIsLoadingPayments] = useState<boolean>(false);
+  // Until the first portfolio fetch lands, "no wallets" is unknown, not empty.
+  // Without this the onboarding card would flash for users who already have one.
+  const [hasLoadedPortfolio, setHasLoadedPortfolio] = useState<boolean>(false);
   const [totalVolumeXLM, setTotalVolumeXLM] = useState<number>(0);
   const [totalPaymentsCount, setTotalPaymentsCount] = useState<number>(0);
   const [crossLedgerAnalytics] = useState<any>(null);
@@ -51,6 +55,7 @@ export default function DashboardPage() {
       setPayments(data.payments);
       setTotalVolumeXLM(Number(data.summary.totalVolumeXLM || 0));
       setTotalPaymentsCount(Number(data.summary.totalPayments || 0));
+      setHasLoadedPortfolio(true);
     } catch (err) {
       console.error('Failed to fetch dashboard data:', err);
     } finally {
@@ -137,6 +142,15 @@ export default function DashboardPage() {
     }
   };
 
+  // The Add Wallet flow is the watcher form below the grid, not a modal, so
+  // "open it" means scroll it into view and put the cursor in its first field.
+  const openAddWalletForm = useCallback(() => {
+    const section = document.getElementById('add-wallet-section');
+    if (!section) return;
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    section.querySelector<HTMLInputElement>('#address')?.focus({ preventScroll: true });
+  }, []);
+
   const handleSaveEmailTemplate = async (template: EmailTemplateConfig) => {
     try {
       await fetch(`${API_BASE_URL}/notifications/preferences`, {
@@ -186,6 +200,11 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Onboarding card: renders only while the user has no wallets. */}
+      {hasLoadedPortfolio && (
+        <EmptyWatchersState walletCount={wallets.length} onAddWallet={openAddWalletForm} />
+      )}
+
       {/* Customizable Dashboard Grid */}
       <DashboardGrid
         items={[
@@ -226,22 +245,25 @@ export default function DashboardPage() {
             label: 'Webhook Sandbox',
             content: <WebhookSandbox />,
           },
-          {
-            id: 'wallets',
-            label: 'Monitored Wallets',
-            content: (
-              <WalletList
-                wallets={wallets}
-                selectedWalletId={selectedWalletId}
-                onSelectWallet={(id) => setSelectedWalletId(id)}
-                onRemoveWallet={handleRemoveWallet}
-                onOpenAddModal={() => {
-                  const el = document.getElementById('add-wallet-section');
-                  if (el) el.scrollIntoView({ behavior: 'smooth' });
-                }}
-              />
-            ),
-          },
+          // Hidden at zero wallets: the onboarding card above already explains
+          // the empty table, so showing both would be two competing CTAs.
+          ...(wallets.length > 0
+            ? [
+                {
+                  id: 'wallets',
+                  label: 'Monitored Wallets',
+                  content: (
+                    <WalletList
+                      wallets={wallets}
+                      selectedWalletId={selectedWalletId}
+                      onSelectWallet={(id) => setSelectedWalletId(id)}
+                      onRemoveWallet={handleRemoveWallet}
+                      onOpenAddModal={openAddWalletForm}
+                    />
+                  ),
+                },
+              ]
+            : []),
           {
             id: 'watcher-and-payments',
             label: 'Watcher & Payment Ledger',
