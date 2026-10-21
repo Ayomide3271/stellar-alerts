@@ -526,3 +526,56 @@ describe("StakingRewardTracker & parseStakingRewardEvent (#212)", () => {
   });
 });
 
+describe("fetchContractEventsInRange Ledger Pagination (#547)", () => {
+  it("paginates across ledger ranges using Soroban RPC getEvents even when intermediate windows are empty", async () => {
+    const { fetchContractEventsInRange, sorobanServer } = await import("./soroban");
+    const { vi } = await import("vitest");
+
+    const getEventsSpy = vi
+      .spyOn(sorobanServer, "getEvents")
+      .mockImplementation(async (params: any) => {
+        if (params.startLedger === 100 && params.endLedger === 149) {
+          return {
+            events: [
+              {
+                contractId: "CCONTRACT1",
+                topic: ["transfer"],
+                value: { from: "GAAA", to: "GBBB", amount: "100" },
+                ledger: 120,
+              },
+            ],
+          };
+        }
+        if (params.startLedger === 150 && params.endLedger === 199) {
+          return { events: [] };
+        }
+        if (params.startLedger === 200 && params.endLedger === 230) {
+          return {
+            events: [
+              {
+                contractId: "CCONTRACT1",
+                topic: ["transfer"],
+                value: { from: "GBBB", to: "GCCC", amount: "250" },
+                ledger: 215,
+              },
+            ],
+          };
+        }
+        return { events: [] };
+      });
+
+    const batches = [];
+    for await (const batch of fetchContractEventsInRange("CCONTRACT1", 100, 230, 50)) {
+      batches.push(batch);
+    }
+
+    expect(getEventsSpy).toHaveBeenCalledTimes(3);
+    expect(batches).toHaveLength(2);
+    expect(batches[0][0].ledgerSeq).toBe(120);
+    expect(batches[1][0].ledgerSeq).toBe(215);
+
+    getEventsSpy.mockRestore();
+  });
+});
+
+

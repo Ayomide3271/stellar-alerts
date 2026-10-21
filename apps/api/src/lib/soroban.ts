@@ -900,11 +900,13 @@ export async function* fetchContractEventsInRange(
   contractId: string,
   startLedger: number,
   endLedger: number,
+  batchSize: number = LEDGER_BATCH_SIZE,
 ): AsyncGenerator<EnrichedSorobanEvent[]> {
   let currentStart = startLedger;
+  const effectiveBatchSize = Math.max(1, batchSize);
 
   while (currentStart <= endLedger) {
-    const batchEnd = Math.min(currentStart + LEDGER_BATCH_SIZE, endLedger);
+    const batchEnd = Math.min(currentStart + effectiveBatchSize - 1, endLedger);
 
     try {
       console.log(
@@ -928,7 +930,10 @@ export async function* fetchContractEventsInRange(
         'Soroban RPC getEvents',
       );
 
-      const events: SorobanRpcEvent[] = response.events || [];
+      const events: SorobanRpcEvent[] = (response?.events || []).filter((evt: SorobanRpcEvent) => {
+        const seq = evt.ledger ?? currentStart;
+        return seq >= currentStart && seq <= batchEnd;
+      });
 
       if (events.length > 0) {
         const enrichedEvents: EnrichedSorobanEvent[] = events.map((evt) => ({
@@ -940,13 +945,7 @@ export async function* fetchContractEventsInRange(
         yield enrichedEvents;
       }
 
-      if (events.length > 0 && events[events.length - 1]?.ledger) {
-        currentStart = (events[events.length - 1].ledger as number) + 1;
-      } else {
-        currentStart = batchEnd + 1;
-      }
-
-      if (events.length === 0) break;
+      currentStart = batchEnd + 1;
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(
