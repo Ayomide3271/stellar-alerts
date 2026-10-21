@@ -23,6 +23,7 @@ import { dispatchDiscordAlert } from '../utils/discord';
 import { dispatchSlackAlert, isValidSlackWebhookUrl } from '../utils/slack';
 import { dispatchPushNotification, PushNotificationData } from '../utils/push-protocol';
 import { classifyWorkerError, getWorkerMaxAttempts, PermanentWorkerError } from './worker-retry-policy';
+import { QueueLaneManager, QueueLane, resolveLaneForAlert } from './queue-lanes';
 
 function decryptWebhookSecret(webhook: {
   keyVersion: number;
@@ -52,6 +53,8 @@ export interface AlertJobData {
   receivedAt: string;
   /** Optional alert filter config — if provided, alerts are suppressed when rules fail */
   filterConfig?: AlertFilterConfig;
+  /** Severity classification used to route the job into a priority lane */
+  severity?: string;
 }
 
 const redisHost = process.env.REDIS_HOST || "localhost";
@@ -64,6 +67,7 @@ export let alertQueue: Queue<AlertJobData> | null = null;
 export let dlqQueue: Queue<AlertJobData> | null = null;
 export let alertQueueEvents: QueueEvents | null = null;
 export let alertWorker: Worker<AlertJobData> | null = null;
+export let queueLaneManager: QueueLaneManager | null = null;
 
 const circuitBreakers = new Map<string, CircuitBreaker<any>>();
 
@@ -564,6 +568,25 @@ try {
   dlqQueue = new Queue<AlertJobData>('payment-alerts-dlq', { connection });
   alertQueueEvents = new QueueEvents('payment-alerts', { connection });
 
+  queueLaneManager = new QueueLaneManager({
+    connection,
+    defaultJobOptions: {
+      attempts: getWorkerMaxAttempts(),
+      backoff: {
+        type: "exponential",
+        delay: 2000,
+      },
+      removeOnComplete: 100,
+      removeOnFail: 500,
+    },
+    processor: paymentAlertWorkerProcessor,
+    concurrency: env.ALERT_WORKER_CONCURRENCY,
+  });
+
+  registerRedisCleanupTask(async () => {
+    if (queueLaneManager) await queueLaneManager.close().catch(() => {});
+  });
+
   alertWorker = new Worker<AlertJobData>(
     'payment-alerts',
     paymentAlertWorkerProcessor,
@@ -924,6 +947,26 @@ export async function processAlertDispatch(data: AlertJobData) {
 }
 
 export async function enqueuePaymentAlert(data: AlertJobData) {
+  if (queueLaneManager) {
+    try {
+      const lane = resolveLaneForAlert(data);
+      const job = await queueLaneManager.enqueue(lane, "dispatch-alert", data, {
+        jobId: `payment-${data.txHash}`,
+      });
+      queueLog.info(
+        { jobId: job.id, txHash: data.txHash, lane, requestId: data.requestId },
+        '📨 Enqueued payment alert job into priority lane',
+      );
+      return job;
+    } catch (err: any) {
+      queueLog.warn(
+        { txHash: data.txHash, err: err.message },
+        'Failed to enqueue alert into priority lane. Falling back to direct dispatch...',
+      );
+      return processAlertDispatch(data);
+    }
+  }
+
   if (!alertQueue) {
     queueLog.info({ txHash: data.txHash }, 'Queue not connected for payment. Dispatching alert directly in-process...');
     return processAlertDispatch(data);
@@ -951,6 +994,17 @@ export async function enqueuePaymentAlert(data: AlertJobData) {
  * queue is configured at all, it dispatches directly like enqueuePaymentAlert.
  */
 export async function enqueuePaymentAlertStrict(data: AlertJobData) {
+  if (queueLaneManager) {
+    const lane = resolveLaneForAlert(data);
+    const job = await queueLaneManager.enqueue(lane, "dispatch-alert", data, {
+      jobId: `payment-${data.txHash}`,
+    });
+    if (!job?.id) {
+      throw new Error(`BullMQ did not confirm alert job for ${data.txHash}`);
+    }
+    return job;
+  }
+
   if (!alertQueue) {
     return processAlertDispatch(data);
   }
