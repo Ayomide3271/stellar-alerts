@@ -97,10 +97,11 @@ const envSchema = z.object({
   SOROBAN_RPC_TIMEOUT_MS: z.coerce.number().int().positive().optional().default(15000),
   NOTIFICATION_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().optional().default(8000),
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().optional().default(10000),
-  // Notification batching (#719): coalesce per-target webhook notifications
-  // into one JSON-array POST. The window is clamped to 1-10s at runtime.
-  WEBHOOK_BATCH_WINDOW_MS: z.coerce.number().int().positive().optional().default(5000),
-  WEBHOOK_BATCH_MAX_SIZE: z.coerce.number().int().positive().optional().default(100),
+  // Replay defense for signed webhook / API-webhook requests (#718):
+  // maximum allowed |now - request timestamp| drift, and the Redis TTL for
+  // one-time nonce consumption.
+  WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS: z.coerce.number().int().positive().optional().default(30000),
+  WEBHOOK_REPLAY_NONCE_TTL_SECONDS: z.coerce.number().int().positive().optional().default(300),
   // Worker concurrency and fairness rate budgets (#309)
   ALERT_WORKER_CONCURRENCY: z.coerce
     .number()
@@ -310,8 +311,8 @@ const defaultEnvFallback: Env = {
   SOROBAN_INDEXER_BENCHMARK_DATA_ROWS: "10000",
   SOROBAN_STAKING_REWARD_WORKER_ENABLED: "true",
   SOROBAN_SAC_WORKER_ENABLED: "true",
-  WEBHOOK_BATCH_WINDOW_MS: 5000,
-  WEBHOOK_BATCH_MAX_SIZE: 100,
+  WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS: 30000,
+  WEBHOOK_REPLAY_NONCE_TTL_SECONDS: 300,
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318/v1/traces",
   OTEL_SERVICE_NAME: "stellar-alerts-api",
 };
@@ -381,8 +382,8 @@ const parseEnv = (): Env => {
     SOROBAN_INDEXER_BENCHMARK_DATA_ROWS: process.env.SOROBAN_INDEXER_BENCHMARK_DATA_ROWS || "10000",
     SOROBAN_STAKING_REWARD_WORKER_ENABLED: process.env.SOROBAN_STAKING_REWARD_WORKER_ENABLED || "true",
     SOROBAN_SAC_WORKER_ENABLED: process.env.SOROBAN_SAC_WORKER_ENABLED || "true",
-    WEBHOOK_BATCH_WINDOW_MS: process.env.WEBHOOK_BATCH_WINDOW_MS || "5000",
-    WEBHOOK_BATCH_MAX_SIZE: process.env.WEBHOOK_BATCH_MAX_SIZE || "100",
+    WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS: process.env.WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS || "30000",
+    WEBHOOK_REPLAY_NONCE_TTL_SECONDS: process.env.WEBHOOK_REPLAY_NONCE_TTL_SECONDS || "300",
     SOROBAN_RESTORATION_WORKER_ENABLED: process.env.SOROBAN_RESTORATION_WORKER_ENABLED || "true",
     SOROBAN_RESTORATION_WORKER_INTERVAL_MS: process.env.SOROBAN_RESTORATION_WORKER_INTERVAL_MS || "60000",
     SOROBAN_RESTORATION_WARNING_LEDGERS: process.env.SOROBAN_RESTORATION_WARNING_LEDGERS || "17280",
