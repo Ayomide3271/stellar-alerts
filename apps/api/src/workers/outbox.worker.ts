@@ -1,4 +1,4 @@
-import { enqueuePaymentAlert, type AlertJobData } from '../lib/queue';
+import { enqueuePaymentAlertStrict, type AlertJobData } from '../lib/queue';
 import { prisma } from '../lib/prisma';
 import { redis } from '../lib/redis';
 import { createLogger } from '../lib/logger';
@@ -43,7 +43,7 @@ async function relayEvent(event: { id: string; eventType: string; payload: unkno
   const payload = { ...(event.payload as OutboxPayload), eventId: event.id };
 
   if (event.eventType === 'payment.alert') {
-    await enqueuePaymentAlert(payload);
+    await enqueuePaymentAlertStrict(payload);
   } else if (event.eventType === 'payment.realtime') {
     await redis.publish(PAYMENT_CHANNEL, JSON.stringify({
       type: 'payment',
@@ -82,9 +82,21 @@ export async function relayOutboxBatch(): Promise<number> {
   return events.length;
 }
 
-export function runOutboxRelay(): void {
-  const poll = () => relayOutboxBatch().catch((error) => log.error({ err: error }, 'Outbox relay poll failed'));
-  poll();
-  setInterval(poll, RELAY_INTERVAL_MS);
+export function runOutboxRelay(): () => void {
+  let running = false;
+  const poll = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await relayOutboxBatch();
+    } catch (error) {
+      log.error({ err: error }, 'Outbox relay poll failed');
+    } finally {
+      running = false;
+    }
+  };
+  void poll();
+  const timer = setInterval(() => void poll(), RELAY_INTERVAL_MS);
   log.info({ intervalMs: RELAY_INTERVAL_MS }, 'Durable outbox relay started');
+  return () => clearInterval(timer);
 }

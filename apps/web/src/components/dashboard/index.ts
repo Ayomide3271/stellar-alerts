@@ -3,6 +3,7 @@ export * from './SummaryStats';
 export * from './VolumeChart';
 export * from './WebhookSandbox';
 export * from './WalletList';
+export * from './EmptyWatchersState';
 export * from './PaymentTable';
 export * from './NotificationModal';
 export * from './SorobanSimulationSandbox';

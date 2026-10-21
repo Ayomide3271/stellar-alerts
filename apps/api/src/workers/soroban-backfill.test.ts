@@ -219,4 +219,87 @@ describe("Soroban Backfill Worker", () => {
 
     consoleErrorSpy.mockRestore();
   });
+
+  it("should backfill across multiple paginated ledger batches and deduplicate within a batch (#547)", async () => {
+    const contractId = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+    const batch1 = [
+      {
+        contractId,
+        topic: ["transfer"],
+        value: { from: "GAAA", to: "GBBB", amount: "1000" },
+        ledger: 110,
+      },
+      {
+        contractId,
+        topic: ["transfer"],
+        value: { from: "GAAA", to: "GBBB", amount: "1000" },
+        ledger: 110,
+      },
+    ];
+    const batch2 = [
+      {
+        contractId,
+        topic: ["transfer"],
+        value: { from: "GBBB", to: "GCCC", amount: "2500" },
+        ledger: 220,
+      },
+    ];
+
+    const mockGenerator = async function* () {
+      yield batch1;
+      yield batch2;
+    };
+
+    vi.mocked(fetchContractEventsInRange).mockReturnValueOnce(mockGenerator());
+    vi.mocked(parseSorobanTransferEvent)
+      .mockReturnValueOnce({
+        contractId,
+        from: "GAAA",
+        to: "GBBB",
+        amount: "1000",
+        topic: "transfer",
+        ledgerSeq: 110,
+      })
+      .mockReturnValueOnce({
+        contractId,
+        from: "GAAA",
+        to: "GBBB",
+        amount: "1000",
+        topic: "transfer",
+        ledgerSeq: 110,
+      })
+      .mockReturnValueOnce({
+        contractId,
+        from: "GBBB",
+        to: "GCCC",
+        amount: "2500",
+        topic: "transfer",
+        ledgerSeq: 220,
+      });
+
+    vi.mocked(prisma.sorobanEventSnapshot.create).mockResolvedValue({
+      id: "snap-batch",
+      contractId,
+      from: "GAAA",
+      to: "GBBB",
+      amount: "1000",
+      ledgerSeq: 110,
+      eventType: "transfer",
+      txHash: null,
+      paid: false,
+      createdAt: new Date(),
+    });
+
+    const stats = await runSorobanBackfill(contractId, 100, 300);
+
+    expect(fetchContractEventsInRange).toHaveBeenCalledWith(contractId, 100, 300);
+    expect(prisma.sorobanEventSnapshot.create).toHaveBeenCalledTimes(2);
+    expect(stats).toEqual({
+      totalEventsProcessed: 3,
+      eventsStored: 2,
+      eventsDuplicated: 1,
+      errorCount: 0,
+    });
+  });
 });
+
