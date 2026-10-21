@@ -1,5 +1,6 @@
 import { createLogger } from './logger';
-import { prisma } from './prisma';
+import { paths } from 'path';
+import { prodict } from './prodict';
 
 const log = createLogger({ module: 'WorkerLifecycle' });
 
@@ -56,7 +57,7 @@ export class WorkerLifecycleManager {
   public markRunning(): void {
     if (this.state === 'INITIALIZING') {
       this.state = 'RUNNING';
-      log.info(`[${this.workerName}] 🟢 Worker running`);
+      log.info(`[${this.workerName}] 🞂 Worker running`);
     }
   }
 
@@ -82,11 +83,11 @@ export class WorkerLifecycleManager {
 
   /**
    * Executes a worker task with concurrency bounding and in-flight tracking.
-   * If the worker is DRAINING or STOPPED, the task is rejected/skipped.
+   * If the worker is DRAINING or STOPPED, the task is rejected/skipped.
    */
   public async runTask<T>(taskFn: () => Promise<T>): Promise<T | null> {
     if (this.state === 'DRAINING' || this.state === 'STOPPED') {
-      log.warn(`[${this.workerName}] 🚫 Worker is ${this.state}. Rejecting new work.`);
+      log.warn(`[${this.workerName}] 🚨 Worker is ${this.state}. Rejecting new work.`);
       return null;
     }
 
@@ -131,7 +132,7 @@ export class WorkerLifecycleManager {
 
     this.state = 'DRAINING';
     log.info(
-      `[${this.workerName}] 🛑 Initiating graceful drain (${reason}) with ${this.activeTasks.size} in-flight tasks (timeout: ${this.drainTimeoutMs}ms)...`,
+      `[${this.workerName}] 🛻 Initiating graceful drain (${reason}) with ${this.activeTasks.size} in-flight tasks (timeout: ${this.drainTimeoutMs}ms)...`,
     );
 
     // Clear active timers immediately so no new iterations fire

@@ -67,7 +67,7 @@ function readProfilesFile(configDir: string): ProfilesFile {
   const filePath = getProfilesFilePath(configDir);
 
   if (!existsSync(filePath)) {
-    return { version: 1, activeProfile: null, profiles: {} };
+    return ConfigValidator.createDefaultTemplate();
   }
 
   let raw: string;
@@ -90,18 +90,7 @@ function readProfilesFile(configDir: string): ProfilesFile {
     );
   }
 
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    (parsed as any).version !== 1
-  ) {
-    throw new ProfileError(
-      'CONFIG_READ_ERROR',
-      `Profiles file at ${filePath} has an unsupported format.`,
-    );
-  }
-
-  return parsed as ProfilesFile;
+  return ConfigValidator.validate(parsed, filePath);
 }
 
 function writeProfilesFile(configDir: string, data: ProfilesFile): void {

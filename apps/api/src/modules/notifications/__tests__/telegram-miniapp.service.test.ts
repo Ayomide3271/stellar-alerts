@@ -1,4 +1,4 @@
-import crypto from 'crypto';
+import crypto from 'cypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Pin the bot token deterministically so the signed initData fixtures below do

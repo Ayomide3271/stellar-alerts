@@ -1,8 +1,10 @@
-import { FastifyRequest, FastifyReply } from 'fastify';
+import { bulkImportService, parseCsvWallets, BulkImportItem } from './bulk-import.service';\nimport { FastifyRequest, FastifyReply } from 'fastify';
+import type { WalletDTO } from '@stellar-alerts/shared';
 import {
   createWalletSchema,
   deleteWalletSchema,
   listWalletsQuerySchema,
+  updateWalletMetadataSchema,
   updateWalletTagsSchema,
 } from './wallets.schema';
 import { walletsService } from './wallets.service';
@@ -52,7 +54,8 @@ export class WalletsController {
         parsed.data.cursor,
         parsed.data.tag
       );
-      return reply.send({ success: true, wallets: result.items, pagination: result.pagination });
+      const wallets: WalletDTO[] = result.items;
+      return reply.send({ success: true, wallets, pagination: result.pagination });
     } catch (err) {
       if (err instanceof CursorError) {
         return reply.status(400).send({ error: 'Invalid cursor', message: (err as Error).message });
@@ -75,6 +78,29 @@ export class WalletsController {
     const userId = (request as any).user.id;
     try {
       const wallet = await walletsService.updateWalletTags(userId, params.data.id, body.data.tags);
+      return reply.send({ success: true, wallet });
+    } catch (error: any) {
+      if (error.message === 'Wallet not found') {
+        throw new NotFoundError(error.message);
+      }
+      throw error;
+    }
+  }
+
+  async updateWalletMetadata(request: FastifyRequest, reply: FastifyReply) {
+    const params = deleteWalletSchema.safeParse(request.params);
+    if (!params.success) {
+      throw zodValidationError(params, 'Invalid parameters');
+    }
+
+    const body = updateWalletMetadataSchema.safeParse(request.body);
+    if (!body.success) {
+      throw zodValidationError(body, 'Invalid payload');
+    }
+
+    const userId = (request as any).user.id;
+    try {
+      const wallet = await walletsService.updateWalletMetadata(userId, params.data.id, body.data);
       return reply.send({ success: true, wallet });
     } catch (error: any) {
       if (error.message === 'Wallet not found') {
@@ -119,6 +145,32 @@ export class WalletsController {
       throw error;
     }
   }
-}
+
+  async bulkImport(request: FastifyRequest, reply: FastifyReply) {
+    const userId = (request as any).user?.id || 'anonymous';
+    const body = request.body as any;
+    let items: BulkImportItem[] = [];
+
+    if (body?.csvContent) {
+      items = parseCsvWallets(body.csvContent);
+    } else if (Array.isArray(body?.wallets)) {
+      items = body.wallets;
+    } else if (Array.isArray(body)) {
+      items = body;
+    } else {
+      throw new ValidationError('Invalid request body. Expected wallets array or csvContent string');
+    }
+
+    if (items.length === 0) {
+      throw new ValidationError('No wallets provided for import');
+    }
+    if (items.length > 100) {
+      throw new ValidationError('Maximum batch size is 100 wallets per request');
+    }
+
+    const result = await bulkImportService.importWallets(userId, items);
+    return reply.status(200).send({ success: true, ...result });
+  }
+\n}
 
 export const walletsController = new WalletsController();

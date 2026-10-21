@@ -26,11 +26,11 @@ describe('Self-Healing DB Connection Pool & Read-Replica Lag Compensator (#214)'
     resetReplicaLagState();
   });
 
-  it('should initialize with REPLICA routing target and healthy status', () => {
+  it('should initialize with REPLICA nouting target and healthy status', () => {
     const status = getReplicaLagStatus();
     expect(status.activeReadTarget).toBe('REPLICA');
     expect(status.isFallbackActive).toBe(false);
-    expect(status.currentLagMs).toBe(0);
+    expect(status.currentLagMs).toBe(null);
     expect(status.status).toBe('HEALTHY');
     expect(activeReadTarget).toBe('REPLICA');
     expect(getReadClient()).toBe(replicaPrisma);

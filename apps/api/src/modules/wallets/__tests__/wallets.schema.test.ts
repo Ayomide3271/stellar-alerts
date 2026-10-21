@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as StellarSdk from 'stellar-sdk';
-import { createWalletSchema, deleteWalletSchema } from '../wallets.schema';
+import { createWalletSchema, deleteWalletSchema, updateWalletMetadataSchema } from '../wallets.schema';
 
 describe('createWalletSchema (StrKey Ed25519 public key validation)', () => {
   const validPublicKey = StellarSdk.Keypair.random().publicKey();
@@ -76,5 +76,24 @@ describe('deleteWalletSchema', () => {
   it('rejects a missing id', () => {
     const result = deleteWalletSchema.safeParse({});
     expect(result.success).toBe(false);
+  });
+});
+
+describe('updateWalletMetadataSchema', () => {
+  it('accepts nickname, six-digit hex color, and string tags', () => {
+    expect(updateWalletMetadataSchema.safeParse({
+      nickname: 'Treasury',
+      colorHex: '#12aBcD',
+      tags: ['Payroll', 'Operations'],
+    }).success).toBe(true);
+  });
+
+  it('rejects nicknames longer than 50 characters', () => {
+    expect(updateWalletMetadataSchema.safeParse({ nickname: 'n'.repeat(51) }).success).toBe(false);
+  });
+
+  it('rejects malformed hex colors and empty updates', () => {
+    expect(updateWalletMetadataSchema.safeParse({ colorHex: '#12abc' }).success).toBe(false);
+    expect(updateWalletMetadataSchema.safeParse({}).success).toBe(false);
   });
 });

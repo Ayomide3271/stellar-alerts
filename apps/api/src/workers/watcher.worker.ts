@@ -14,11 +14,13 @@ import {
 } from '../lib/soroban';
 import { contractRouter } from '../lib/contract-router';
 import { withWalletLock } from '../lib/lock';
+import { distributedLockManager } from '../lib/redlock';
 import { shouldAlert, PaymentContext } from '../lib/rules-engine';
 import { evaluateAlertRules, evaluateAndDispatch, AlertRuleRecord, NormalizedPaymentEvent } from '../lib/alert-rule-evaluator';
 import { MemoryMonitor, MemorySnapshot } from '../utils/memory-monitor';
 import { appendPaymentChecksum } from '../services/checksumChain.service';
 import { createLogger } from '../lib/logger';
+import { outboxService } from '../modules/outbox/outbox.service';
 import { WorkerLifecycleManager } from '../lib/worker-lifecycle';
 import { startTelemetry, shutdownTelemetry } from '../lib/telemetry';
 import { startWorkerMetricsServer, stopWorkerMetricsServer } from '../lib/worker-metrics-server';
@@ -221,14 +223,12 @@ export async function processPaymentRecord(
               fromAddress,
               receivedAt: receivedAt.toISOString(),
             };
-            await tx.outboxEvent.createMany({
-              data: [
-                ...(shouldSendAlert
-                  ? [{ eventType: 'payment.alert', aggregateId: persistedPayment.id, payload: eventPayload }]
-                  : []),
-                { eventType: 'payment.realtime', aggregateId: persistedPayment.id, payload: eventPayload },
-              ],
-            });
+            await outboxService.record(tx, [
+              ...(shouldSendAlert
+                ? [{ eventType: 'payment.alert' as const, aggregateId: persistedPayment.id, payload: eventPayload }]
+                : []),
+              { eventType: 'payment.realtime' as const, aggregateId: persistedPayment.id, payload: eventPayload },
+            ]);
           }
 
           let cursorGap = { hasGap: false, ledgerDelta: 0 };
@@ -662,6 +662,17 @@ export async function startHorizonSSEStream(
       return noopClose;
     }
 
+    // Coordinate with peer worker replicas via distributed locking (#744)
+    const lock = await distributedLockManager.acquireWalletLock(wallet.id);
+    if (!lock) {
+      log.info(
+        `[WatcherStream] 🔒 Distributed lock for wallet ${wallet.publicKey.substring(0, 8)}... (${wallet.id}) held by peer replica. Skipping stream.`
+      );
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+      return noopClose;
+    }
+
     const maxAttempts = options.maxReconnectAttempts ?? Infinity;
     const reconnectDelay = options.reconnectDelayMs ?? 1000;
     const maxReconnectDelay = options.maxReconnectDelayMs ?? reconnectDelay * 30;
@@ -811,6 +822,7 @@ export async function startHorizonSSEStream(
     return () => {
       isClosed = true;
       cleanupCurrent();
+      void distributedLockManager.releaseWalletLock(wallet.id);
     };
   });
 }
@@ -956,6 +968,9 @@ export async function runWatcher() {
   });
   watcherLifecycle.registerCleanup('prisma', async () => {
     await prisma.$disconnect();
+  });
+  watcherLifecycle.registerCleanup('distributedLocks', async () => {
+    await distributedLockManager.releaseAll();
   });
 
   await loadContractRegistry();
@@ -1231,6 +1246,8 @@ if (require.main === module) {
   registerSupervisorHeartbeat();
   startMemoryMonitor();
   runWatcher();
+  // Loaded lazily so importing the watcher (e.g. in tests) never opens relay connections.
+  void import('./outbox.worker').then(({ runOutboxRelay }) => runOutboxRelay());
 
   // Issue #20 / #536: Graceful shutdown for the watcher worker process
   let watcherIntervalId: NodeJS.Timeout | undefined;

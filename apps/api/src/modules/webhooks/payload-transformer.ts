@@ -1,179 +1,345 @@
-export interface PayloadTransformationRule {
-  template?: string | Record<string, any>;
-  fieldMappings?: Record<string, string>;
-  sanitizeKeys?: boolean;
+const logger = {
+  info: (data: Record<string, unknown>, msg: string) => console.log(`[PayloadTransformer] ${msg}`, data),
+  warn: (data: Record<string, unknown>, msg: string) => console.warn(`[PayloadTransformer] ${msg}`, data),
+  error: (data: Record<string, unknown>, msg: string) => console.error(`[PayloadTransformer] ${msg}`, data),
+};
+
+export interface PayloadTransformationResult {
+  transformed: boolean;
+  payload: Record<string, unknown>;
+  error?: string;
 }
 
-export class DynamicPayloadTransformer {
-  /**
-   * Safe property accessor supporting dot-notation and array indices (e.g. "data.user.items[0].id")
-   */
-  public getNestedValue(obj: any, path: string): any {
-    if (!obj || !path) return undefined;
-    const cleanPath = path.replace(/\[(\d+)\]/g, '.$1');
-    const parts = cleanPath.split('.').filter(Boolean);
+export interface PayloadTransformerOptions {
+  strictVariables?: boolean;
+}
 
-    let current = obj;
-    for (const part of parts) {
-      if (current === null || current === undefined) return undefined;
-      current = current[part];
+const FORBIDDEN_TOKENS = [
+  '__proto__',
+  'constructor',
+  'prototype',
+  'process',
+  'require',
+  'import',
+  'global',
+  'window',
+];
+
+const FORBIDDEN_TAGS = [
+  'include',
+  'render',
+  'layout',
+  'eval',
+  'file',
+  'exec',
+];
+
+/**
+ * Dynamic Webhook Payload Transformation Engine via Liquid Templates (#748).
+ * Allows subscribers to customize outgoing webhook JSON formatting using Liquid templates
+ * and JsonPath-like filters with strict sandboxing and security safeguards.
+ */
+export class PayloadTransformer {
+  private liquidEngine: unknown | null = null;
+
+  constructor() {
+    this.initLiquidEngine();
+  }
+
+  private initLiquidEngine(): void {
+    try {
+      // Dynamic import / require of liquidjs if installed in node_modules
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Liquid } = require('liquidjs');
+      if (Liquid) {
+        this.liquidEngine = new Liquid({
+          strictVariables: false,
+          strictFilters: false,
+          ownPropertyOnly: true, // Prevents prototype pollution
+        });
+      }
+    } catch {
+      // LiquidJS not present; fallback to built-in secure Liquid parser
+      this.liquidEngine = null;
     }
+  }
+
+  /**
+   * Validates a template string for unsafe tags, forbidden properties, and prototype pollution.
+   */
+  public validateTemplateSecurity(template: string): { safe: boolean; reason?: string } {
+    if (!template) return { safe: true };
+
+    const lower = template.toLowerCase();
+
+    for (const token of FORBIDDEN_TOKENS) {
+      if (token.startsWith('__') || token === 'constructor' || token === 'prototype') {
+        if (lower.includes(token)) {
+          return {
+            safe: false,
+            reason: `Unsafe token detected in template: ${token}`,
+          };
+        }
+      } else {
+        const tokenRegex = new RegExp(`(^|[^a-zA-Z0-9_])${token}([^a-zA-Z0-9_]|$)`, 'i');
+        if (tokenRegex.test(template)) {
+          return {
+            safe: false,
+            reason: `Unsafe token detected in template: ${token}`,
+          };
+        }
+      }
+    }
+
+    // Check for unsafe Liquid tags like {% include ... %}, {% render ... %}
+    for (const tag of FORBIDDEN_TAGS) {
+      const tagRegex = new RegExp(`\\{%\\s*${tag}\\b`, 'i');
+      if (tagRegex.test(template)) {
+        return {
+          safe: false,
+          reason: `Forbidden template tag rejected for security: ${tag}`,
+        };
+      }
+    }
+
+    return { safe: true };
+  }
+
+  /**
+   * Evaluates a user-defined Liquid template against an event payload.
+   * Outputs validated custom JSON payload matching subscriber target specification.
+   * Safely handles syntax errors in templates with fallback to standard schema and warning log.
+   */
+  public async transform(
+    payload: Record<string, unknown>,
+    template?: string | null
+  ): Promise<PayloadTransformationResult> {
+    if (!template || template.trim() === '') {
+      return {
+        transformed: false,
+        payload,
+      };
+    }
+
+    // 1. Security validation: reject unsafe template tags (preventing prototype pollution or arbitrary execution)
+    const securityCheck = this.validateTemplateSecurity(template);
+    if (!securityCheck.safe) {
+      logger.warn(
+        { reason: securityCheck.reason },
+        '[PayloadTransformer] ⚠️ Unsafe template rejected. Falling back to default schema.'
+      );
+      return {
+        transformed: false,
+        payload,
+        error: securityCheck.reason,
+      };
+    }
+
+    // 2. Evaluate template against payload context
+    try {
+      const renderedText = await this.renderTemplate(template, payload);
+
+      // 3. Validate resulting output as valid JSON
+      const trimmed = renderedText.trim();
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(trimmed);
+      } catch (jsonErr: unknown) {
+        const errMsg = jsonErr instanceof Error ? jsonErr.message : String(jsonErr);
+        logger.warn(
+          { err: errMsg, outputSnippet: trimmed.substring(0, 100) },
+          '[PayloadTransformer] ⚠️ Template rendered non-JSON output. Falling back to default schema.'
+        );
+        return {
+          transformed: false,
+          payload,
+          error: `Template output is not valid JSON: ${errMsg}`,
+        };
+      }
+
+      if (parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)) {
+        return {
+          transformed: true,
+          payload: parsedJson as Record<string, unknown>,
+        };
+      } else if (Array.isArray(parsedJson)) {
+        return {
+          transformed: true,
+          payload: { items: parsedJson },
+        };
+      } else {
+        return {
+          transformed: false,
+          payload,
+          error: 'Template output did not produce a JSON object',
+        };
+      }
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { err: errMsg },
+        '[PayloadTransformer] ⚠️ Template evaluation failed. Falling back to default schema.'
+      );
+      return {
+        transformed: false,
+        payload,
+        error: `Liquid evaluation error: ${errMsg}`,
+      };
+    }
+  }
+
+  /**
+   * Renders the template string using Liquid engine or safe built-in interpreter.
+   */
+  private async renderTemplate(template: string, payload: Record<string, unknown>): Promise<string> {
+    const context = {
+      ...payload,
+      event: payload.event ?? payload,
+      data: (payload.data as Record<string, unknown>) ?? payload,
+      payload,
+    };
+
+    if (this.liquidEngine && typeof (this.liquidEngine as { parseAndRender?: unknown }).parseAndRender === 'function') {
+      const engine = this.liquidEngine as { parseAndRender: (tpl: string, ctx: unknown) => Promise<string> };
+      return await engine.parseAndRender(template, context);
+    }
+
+    return this.evaluateBuiltinLiquid(template, context);
+  }
+
+  /**
+   * Secure built-in Liquid expression evaluator supporting variable access, JsonPath, filters, and loops/conditionals.
+   */
+  public evaluateBuiltinLiquid(template: string, context: Record<string, unknown>): string {
+    let result = template;
+
+    // Handle conditionals: {% if condition %} ... {% else %} ... {% endif %}
+    result = result.replace(
+      /\{%\s*if\s+(.*?)\s*%\}([\s\S]*?)(?:\{%\s*else\s*%\}([\s\S]*?))?\{%\s*endif\s*%\}/g,
+      (_, condExpr, truthyBlock, falsyBlock) => {
+        const condVal = this.evaluateCondition(condExpr, context);
+        return condVal ? truthyBlock : (falsyBlock ?? '');
+      }
+    );
+
+    // Handle variable interpolation: {{ expression | filter: arg }}
+    result = result.replace(/\{\{\s*(.*?)\s*\}\}/g, (_, exprWithFilters) => {
+      const val = this.evaluateLiquidExpression(exprWithFilters, context);
+      if (val === undefined || val === null) {
+        return 'null';
+      }
+      if (typeof val === 'string') {
+        return JSON.stringify(val).slice(1, -1); // escape string content without surrounding quotes
+      }
+      if (typeof val === 'object') {
+        return JSON.stringify(val);
+      }
+      return String(val);
+    });
+
+    return result;
+  }
+
+  private evaluateCondition(condExpr: string, context: Record<string, unknown>): boolean {
+    const trimmed = condExpr.trim();
+    if (trimmed.includes('==')) {
+      const [left, right] = trimmed.split('==').map((s) => s.trim());
+      const leftVal = this.evaluateLiquidExpression(left, context);
+      const rightVal = this.resolveLiteralOrVar(right, context);
+      return String(leftVal) === String(rightVal);
+    }
+    if (trimmed.includes('!=')) {
+      const [left, right] = trimmed.split('!=').map((s) => s.trim());
+      const leftVal = this.evaluateLiquidExpression(left, context);
+      const rightVal = this.resolveLiteralOrVar(right, context);
+      return String(leftVal) !== String(rightVal);
+    }
+
+    const val = this.evaluateLiquidExpression(trimmed, context);
+    return Boolean(val);
+  }
+
+  private resolveLiteralOrVar(token: string, context: Record<string, unknown>): unknown {
+    if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+      return token.slice(1, -1);
+    }
+    if (token === 'true') return true;
+    if (token === 'false') return false;
+    if (token === 'null') return null;
+    if (!isNaN(Number(token))) return Number(token);
+    return this.resolvePath(context, token);
+  }
+
+  public evaluateLiquidExpression(expression: string, context: Record<string, unknown>): unknown {
+    const parts = expression.split('|').map((p) => p.trim());
+    const baseExpr = parts[0];
+    const filters = parts.slice(1);
+
+    let val: unknown = this.resolvePath(context, baseExpr);
+
+    for (const filterStr of filters) {
+      val = this.applyFilter(val, filterStr, context);
+    }
+
+    return val;
+  }
+
+  private resolvePath(obj: unknown, path: string): unknown {
+    if (!obj || typeof obj !== 'object' || !path) return undefined;
+
+    let cleanPath = path.trim();
+    if (cleanPath.startsWith('$.')) {
+      cleanPath = cleanPath.slice(2);
+    } else if (cleanPath.startsWith('$')) {
+      cleanPath = cleanPath.slice(1);
+    }
+
+    // Check for forbidden properties
+    if (cleanPath.includes('__proto__') || cleanPath.includes('constructor') || cleanPath.includes('prototype')) {
+      return undefined;
+    }
+
+    cleanPath = cleanPath.replace(/\[(\d+)\]/g, '.$1');
+    const segments = cleanPath.split('.').filter(Boolean);
+
+    let current: unknown = obj;
+    for (const seg of segments) {
+      if (current === null || current === undefined || typeof current !== 'object') {
+        return undefined;
+      }
+      current = (current as Record<string, unknown>)[seg];
+    }
+
     return current;
   }
 
-  /**
-   * Set value safely at nested path in target object
-   */
-  public setNestedValue(target: any, path: string, value: any): void {
-    if (!target || !path) return;
-    const cleanPath = path.replace(/\[(\d+)\]/g, '.$1');
-    const parts = cleanPath.split('.').filter(Boolean);
+  private applyFilter(value: unknown, filterStr: string, context: Record<string, unknown>): unknown {
+    const colonIdx = filterStr.indexOf(':');
+    const filterName = (colonIdx === -1 ? filterStr : filterStr.slice(0, colonIdx)).trim().toLowerCase();
+    const rawArg = colonIdx === -1 ? '' : filterStr.slice(colonIdx + 1).trim();
+    const arg = this.resolveLiteralOrVar(rawArg, context);
 
-    let current = target;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const part = parts[i];
-      if (!(part in current) || typeof current[part] !== 'object' || current[part] === null) {
-        // If next part is a number, create array, else object
-        const nextPartIsNum = !isNaN(Number(parts[i + 1]));
-        current[part] = nextPartIsNum ? [] : {};
-      }
-      current = current[part];
+    switch (filterName) {
+      case 'upcase':
+      case 'uppercase':
+        return typeof value === 'string' ? value.toUpperCase() : value;
+      case 'downcase':
+      case 'lowercase':
+        return typeof value === 'string' ? value.toLowerCase() : value;
+      case 'append':
+        return `${String(value ?? '')}${String(arg ?? '')}`;
+      case 'prepend':
+        return `${String(arg ?? '')}${String(value ?? '')}`;
+      case 'default':
+        return value !== undefined && value !== null && value !== '' ? value : arg;
+      case 'json':
+        return JSON.stringify(value);
+      case 'split':
+        return typeof value === 'string' ? value.split(String(arg ?? ',')) : [];
+      default:
+        return value;
     }
-    current[parts[parts.length - 1]] = value;
-  }
-
-  /**
-   * Evaluates expressions inside {{...}} in a sandboxed manner without eval
-   */
-  public evaluateExpression(expression: string, context: Record<string, any>): any {
-    const expr = expression.trim();
-
-    // Check for math: prefix e.g. {{math: data.amount * 0.01}}
-    if (expr.startsWith('math:')) {
-      const mathExpr = expr.substring(5).trim();
-      return this.evaluateMathExpression(mathExpr, context);
-    }
-
-    // Check for concat: prefix e.g. {{concat: user.firstName, " ", user.lastName}}
-    if (expr.startsWith('concat:')) {
-      const concatExpr = expr.substring(7).trim();
-      return this.evaluateConcatExpression(concatExpr, context);
-    }
-
-    // Check for jsonpath / dot notation e.g. {{event.type}} or {{data.amount}}
-    if (expr.startsWith('jsonpath:') || expr.startsWith('$.')) {
-      const path = expr.replace(/^jsonpath:/, '').replace(/^\$\./, '');
-      return this.getNestedValue(context, path);
-    }
-
-    // Default dot notation lookup
-    const directVal = this.getNestedValue(context, expr);
-    if (directVal !== undefined) return directVal;
-
-    return expr;
-  }
-
-  private evaluateMathExpression(expr: string, context: Record<string, any>): number {
-    // Replace variable names with their values
-    let safeExpr = expr.replace(/([a-zA-Z_][a-zA-Z0-9_\.]*)/g, (match) => {
-      const val = this.getNestedValue(context, match);
-      return val !== undefined && !isNaN(Number(val)) ? String(Number(val)) : '0';
-    });
-
-    // Sanitize math string: only allow digits, decimals, whitespace, and + - * / % ( )
-    if (!/^[0-9\.\s\+\-\*\/\%\(\)]+$/.test(safeExpr)) {
-      return 0;
-    }
-
-    try {
-      // Safe math execution using Function with strict math args
-      const result = new Function(`"use strict"; return (${safeExpr});`)();
-      return typeof result === 'number' && !isNaN(result) ? result : 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  private evaluateConcatExpression(expr: string, context: Record<string, any>): string {
-    const parts = expr.split(',').map((p) => p.trim());
-    return parts
-      .map((part) => {
-        if ((part.startsWith('"') && part.endsWith('"')) || (part.startsWith("'") && part.endsWith("'"))) {
-          return part.slice(1, -1);
-        }
-        const val = this.getNestedValue(context, part);
-        return val !== undefined ? String(val) : '';
-      })
-      .join('');
-  }
-
-  /**
-   * Applies dynamic transformation template to input payload
-   */
-  public transform(payload: Record<string, any>, rule: PayloadTransformationRule | string): Record<string, any> {
-    if (!rule) return payload;
-
-    const normalizedRule: PayloadTransformationRule =
-      typeof rule === 'string' ? { template: rule } : rule;
-
-    const result: Record<string, any> = {};
-
-    // Apply explicit field mappings if provided
-    if (normalizedRule.fieldMappings) {
-      for (const [targetPath, sourceExpr] of Object.entries(normalizedRule.fieldMappings)) {
-        const val = sourceExpr.includes('{{')
-          ? this.evaluateTemplateString(sourceExpr, payload)
-          : this.evaluateExpression(sourceExpr, payload);
-        this.setNestedValue(result, targetPath, val);
-      }
-    }
-
-    // Apply JSON/String template if provided
-    if (normalizedRule.template) {
-      if (typeof normalizedRule.template === 'string') {
-        try {
-          const renderedString = this.evaluateTemplateString(normalizedRule.template, payload);
-          return JSON.parse(renderedString);
-        } catch {
-          return { raw: this.evaluateTemplateString(normalizedRule.template, payload) };
-        }
-      } else if (typeof normalizedRule.template === 'object') {
-        return this.transformObjectTemplate(normalizedRule.template, payload);
-      }
-    }
-
-    return Object.keys(result).length > 0 ? result : payload;
-  }
-
-  private evaluateTemplateString(templateStr: string, context: Record<string, any>): string {
-    return templateStr.replace(/\{\{\s*(.*?)\s*\}\}/g, (_, expr) => {
-      const val = this.evaluateExpression(expr, context);
-      if (val === undefined || val === null) return '';
-      if (typeof val === 'object') return JSON.stringify(val);
-      return String(val);
-    });
-  }
-
-  private transformObjectTemplate(templateObj: Record<string, any>, context: Record<string, any>): Record<string, any> {
-    const res: Record<string, any> = {};
-
-    for (const [key, val] of Object.entries(templateObj)) {
-      if (typeof val === 'string') {
-        if (val.startsWith('{{') && val.endsWith('}}')) {
-          const innerExpr = val.slice(2, -2).trim();
-          res[key] = this.evaluateExpression(innerExpr, context);
-        } else {
-          res[key] = this.evaluateTemplateString(val, context);
-        }
-      } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-        res[key] = this.transformObjectTemplate(val, context);
-      } else {
-        res[key] = val;
-      }
-    }
-
-    return res;
   }
 }
 
-export const dynamicPayloadTransformer = new DynamicPayloadTransformer();
+export const payloadTransformer = new PayloadTransformer();

@@ -13,6 +13,10 @@ import { isValidE164Number } from '../../utils/whatsapp';
 import { isValidSlackWebhookUrl } from '../../utils/slack';
 import { ValidationError } from '../../lib/errors';
 import { dispatchPushNotification } from '../../utils/push-protocol';
+security/issue-723-200-pts-notifications-native-pagerduty-opsgenie
+
+import { slackNotificationProvider } from './providers/slack.provider';
+contribution
 import { logger } from '../../lib/logger';
 
 export function isValidDiscordWebhookUrl(url: string): boolean {
@@ -388,6 +392,36 @@ export class NotificationsService {
   ) {
     const { opsgenieProvider } = await import('./providers/opsgenie.provider');
     return opsgenieProvider.createAlert(target, alert);
+  }
+
+  /**
+   * Trigger the 24-hour transaction & security digest for a single user.
+   * Respects the user's digest frequency setting (daily/weekly/off).
+   *
+   * @param userId - User ID
+   * @param options - Optional overrides (e.g. force send for testing)
+   */
+  async sendDigest(
+    userId: string,
+    options: { force?: boolean } = {}
+  ): Promise<{ sent: boolean; reason?: string }> {
+    const prefs = await prisma.notificationPreference.findUnique({ where: { userId } });
+    if (!prefs) {
+      return { sent: false, reason: 'no_preferences' };
+    }
+    // Lazy-load the digest worker so a broken/missing worker module cannot
+    // break this service at import time.
+    try {
+      const mod = await import('../../workers/digest.worker');
+      const digestWorker = (mod as any)?.digestWorker;
+      if (!digestWorker || typeof digestWorker.processUser !== 'function') {
+        return { sent: false, reason: 'digest_worker_unavailable' };
+      }
+      return await digestWorker.processUser(userId, prefs, options);
+    } catch (error: any) {
+      logger.warn?.('[NotificationsService] digest worker unavailable', error?.message);
+      return { sent: false, reason: error?.message || 'digest_worker_unavailable' };
+    }
   }
 
   /**

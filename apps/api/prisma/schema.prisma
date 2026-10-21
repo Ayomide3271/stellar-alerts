@@ -38,12 +38,15 @@ model Wallet {
   user       User             @relation(fields: [userId], references: [id])
   publicKey  String           @unique
   label      String?
+  tags       String[]         @default([])
+  metadata   Json             @default("{}")
   createdAt   DateTime         @default(now())
   payments   Payment[]
   cursor     IngestionCursor?
   alertRules AlertRule[]
 
   @@index([userId, createdAt])
+  @@index([deletedAt])
 }
 
 model IngestionCursor {
@@ -83,12 +86,35 @@ model Payment {
   @@index([walletId])
   @@index([asset])
   @@index([walletId, receivedAt])
+  @@index([createdAt])
+}
+
+// Cold storage for payments older than 90 days, partitioned for archival
+model PaymentArchive {
+  id          String   @id @default(cuid())
+  walletId    String
+  txHash      String   @unique
+  fromAddress String
+  amount      Decimal
+  asset       String
+  assetIssuer String?
+  memo        String?
+  receivedAt  DateTime
+  createdAt   DateTime @default(now())
+  archivedAt  DateTime @default(now())
+
+  @@index([walletId])
+  @@index([asset])
+  @@index([walletId, receivedAt])
+  @@index([createdAt])
+  @@index([archivedAt])
 }
 
 model OutboxEvent {
   id          String    @id @default(cuid())
   eventType   String
   aggregateId String
+  idempotencyKey String? @unique
   payload     Json
   status      String    @default("pending")
   attempts    Int       @default(0)
@@ -134,6 +160,7 @@ model DeliveryLog {
   status    String
   error     String?
   attempt   Int      @default(1)
+  durationMs Float?
   createdAt DateTime @default(now())
 
   @@unique([paymentId, channel])
@@ -273,6 +300,7 @@ model WebhookLog {
   webhook      Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
   statusCode   Int?
   responseBody String?
+  durationMs   Float?
   error        String?
   sentAt       DateTime @default(now())
   createdAt    DateTime @default(now())

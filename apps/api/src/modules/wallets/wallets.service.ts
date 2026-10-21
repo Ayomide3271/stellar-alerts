@@ -1,3 +1,4 @@
+import type { Prisma } from '../../generated/prisma/client';
 import { prisma, prismaRead } from '../../lib/prisma';
 import { verifyZkProof } from '../../utils/zkp-verifier';
 import {
@@ -89,13 +90,40 @@ export class WalletsService {
     });
   }
 
+  async updateWalletMetadata(
+    userId: string,
+    walletId: string,
+    update: { nickname?: string; colorHex?: string; tags?: string[] },
+  ) {
+    const wallet = await prisma.wallet.findUnique({ where: { id: walletId } });
+    if (!wallet || wallet.userId !== userId) {
+      throw new Error('Wallet not found');
+    }
+
+    const currentMetadata = wallet.metadata && typeof wallet.metadata === 'object' && !Array.isArray(wallet.metadata)
+      ? wallet.metadata as Prisma.InputJsonObject
+      : {};
+    const metadata: Prisma.InputJsonObject = { ...currentMetadata };
+    if (update.nickname !== undefined) metadata.nickname = update.nickname;
+    if (update.colorHex !== undefined) metadata.colorHex = update.colorHex;
+
+    const data: Prisma.WalletUpdateInput = { metadata };
+    if (update.tags !== undefined) {
+      const tags = normalizeTags(update.tags);
+      data.tags = tags;
+      metadata.tags = tags;
+    }
+
+    return prisma.wallet.update({ where: { id: walletId }, data });
+  }
+
   /**
    * Returns a cursor-paginated list of wallets for the user.
    * Stable ordering: createdAt DESC, id DESC.
    * Optionally filters by a tag (case-insensitive).
    */
   async getWallets(userId: string, limit: number = 20, cursor?: string, tag?: string) {
-    const where: Record<string, any> = { userId };
+    const where: Record<string, any> = { userId, deletedAt: null };
 
     if (tag) {
       // Prisma's array filter is case-sensitive on PostgresQL.
@@ -121,7 +149,7 @@ export class WalletsService {
       }
     }
 
-    const cursorWhere = buildCursorWhere(cursor);
+    const cursorWhere = cursor ? buildCursorWhere(cursor) : undefined;
     if (cursorWhere) {
       where.AND = [{ OR: cursorWhere }];
     }
@@ -152,7 +180,11 @@ export class WalletsService {
     if (!wallet || wallet.userId !== userId) {
       throw new Error('Wallet not found');
     }
-    await prisma.wallet.delete({ where: { id: walletId } });
+    // Soft-delete lifecycle: set deletedAt timestamp to avoid foreign-key cascading locks (#776)
+    await prisma.wallet.update({
+      where: { id: walletId },
+      data: { deletedAt: new Date() },
+    });
   }
 }
 

@@ -6,6 +6,7 @@ import { render } from 'ink';
 import { registerWalletCommands } from './commands/wallet.js';
 import { registerStreamCommands } from './commands/stream.js';
 import { registerProfileCommands } from './commands/profile.js';
+import { registerCompletionCommands } from './commands/completion.js';
 import StreamTui from './tui/stream-tui.js';
 
 const program = new Command();
@@ -24,6 +25,7 @@ program
 registerWalletCommands(program);
 registerStreamCommands(program);
 registerProfileCommands(program);
+registerCompletionCommands(program);
 
 // Health check command
 program

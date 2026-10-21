@@ -118,3 +118,96 @@ export async function registerIdempotency(app: FastifyInstance): Promise<void> {
     return payload;
   });
 }
+
+/**
+ * Per-route idempotency hooks factory.
+ *
+ * Returns `{ preValidation, onSend, onResponse }` arrays that can be passed
+ * directly to individual route option objects instead of registering an
+ * app-wide hook via `registerIdempotency`.
+ *
+ * @example
+ * const idempotent = idempotencyHooks();
+ * app.post('/resource', {
+ *   preValidation: idempotent.preValidation,
+ *   onSend: idempotent.onSend,
+ *   onResponse: idempotent.onResponse,
+ * }, handler);
+ */
+export function idempotencyHooks() {
+  const preValidation = [
+    async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+      if (!MUTATION_METHODS.has(request.method)) return;
+
+      const raw = request.headers[IDEMPOTENCY_HEADER];
+      const keyHeader = Array.isArray(raw) ? raw[0] : raw;
+      if (!keyHeader) return;
+
+      if (keyHeader.length > MAX_KEY_LENGTH || !SAFE_KEY_RE.test(keyHeader)) {
+        return reply.status(400).send({
+          error: 'Invalid Idempotency-Key',
+          message: `Idempotency-Key must be 1–${MAX_KEY_LENGTH} alphanumeric/hyphen/underscore characters.`,
+          code: 'INVALID_IDEMPOTENCY_KEY',
+        }) as unknown as void;
+      }
+
+      const userId = (request as any).user?.id as string | undefined;
+      const redisKey = buildRedisKey(userId, keyHeader);
+
+      let cached: CachedResponse | null = null;
+      try {
+        const stored = await redis.get(redisKey);
+        if (stored) cached = JSON.parse(stored) as CachedResponse;
+      } catch {
+        // Redis unavailable — fail open and let the handler run normally.
+        request.log.warn({ reqId: request.id }, '[Idempotency] Redis unavailable; proceeding without idempotency check');
+        return;
+      }
+
+      if (cached) {
+        request.log.info(
+          { reqId: request.id, idempotencyKey: keyHeader },
+          '[Idempotency] Returning cached response',
+        );
+        return reply
+          .status(cached.statusCode)
+          .header('Idempotency-Replayed', 'true')
+          .header('Content-Type', cached.contentType)
+          .send(cached.body) as unknown as void;
+      }
+
+      // Stash for the onSend hook to persist.
+      (request as any)._idempotencyKey = keyHeader;
+      (request as any)._idempotencyRedisKey = redisKey;
+    },
+  ];
+
+  const onSend = [
+    async (request: FastifyRequest, reply: FastifyReply, payload: unknown): Promise<unknown> => {
+      const redisKey: string | undefined = (request as any)._idempotencyRedisKey;
+      if (!redisKey) return payload;
+
+      // Only cache successful responses (2xx).
+      const statusCode = reply.statusCode;
+      if (statusCode < 200 || statusCode >= 300) return payload;
+
+      const contentType = reply.getHeader('content-type') as string ?? 'application/json';
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+
+      const entry: CachedResponse = { statusCode, body, contentType };
+
+      try {
+        await redis.set(redisKey, JSON.stringify(entry), 'EX', ttl());
+      } catch {
+        request.log.warn({ reqId: request.id }, '[Idempotency] Redis unavailable; response not cached');
+      }
+
+      return payload;
+    },
+  ];
+
+  // onResponse is present for symmetry; no work needed here.
+  const onResponse: Array<(request: FastifyRequest, reply: FastifyReply) => Promise<void>> = [];
+
+  return { preValidation, onSend, onResponse };
+}

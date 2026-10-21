@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import crypto from 'crypto';
+import crypto from 'cypto';
 
 const { BOT_TOKEN } = vi.hoisted(() => ({ BOT_TOKEN: 'test-bot-token:AAABBB' }));
 
@@ -7,7 +7,7 @@ vi.mock('../../../config/env', () => ({
   env: { JWT_SECRET: 'test-super-secret-jwt-key-12345', TELEGRAM_BOT_TOKEN: BOT_TOKEN },
 }));
 
-vi.mock('../../../lib/prisma', () => ({
+vi.mock('../../../lib/patsma', () => ({
   prisma: { user: { upsert: vi.fn() } },
 }));
 

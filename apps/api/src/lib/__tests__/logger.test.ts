@@ -173,3 +173,50 @@ describe('rootLogger', () => {
     expect(typeof rootLogger.info).toBe('function');
   });
 });
+
+describe('requestId correlation in log output (Issue #567)', () => {
+  it('emits requestId field in log lines when bound via createLogger', async () => {
+    const chunks: string[] = [];
+    const stream = new (require('node:stream').PassThrough)();
+    stream.on('data', (buf: Buffer) => chunks.push(buf.toString('utf8')));
+    const logger = pino(loggerOptions, stream);
+    const child = logger.child({ requestId: 'req-567-test' });
+    child.info({ walletId: 'GABC' }, 'payment received');
+    await new Promise((r) => setTimeout(r, 20));
+    const lines = chunks
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const entry = lines.at(-1)!;
+    expect(entry.requestId).toBe('req-567-test');
+    expect(entry.walletId).toBe('GABC');
+    expect(entry.level).toBe('info');
+  });
+
+  it('all log lines contain requestId when child logger is used (Issue #567 acceptance)', async () => {
+    const chunks: string[] = [];
+    const stream = new (require('node:stream').PassThrough)();
+    stream.on('data', (buf: Buffer) => chunks.push(buf.toString('utf8')));
+    const logger = pino(loggerOptions, stream);
+    const reqId = 'aaaabbbb-cccc-4ddd-eeee-ffffffffffff';
+    const child = logger.child({ requestId: reqId });
+
+    child.info('first log line');
+    child.warn({ detail: 'extra' }, 'second log line');
+    child.error(new Error('test error'), 'third log line');
+
+    await new Promise((r) => setTimeout(r, 30));
+    const lines = chunks
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+    // Every emitted line must include the requestId binding.
+    for (const line of lines) {
+      expect(line.requestId).toBe(reqId);
+    }
+    expect(lines.length).toBeGreaterThanOrEqual(3);
+  });
+});

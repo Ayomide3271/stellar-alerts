@@ -8,6 +8,7 @@ vi.mock('../../../lib/prisma', () => ({
       create: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      update: vi.fn(),
       delete: vi.fn(),
     },
     user: {
@@ -43,6 +44,7 @@ describe('WalletsService', () => {
           userId: 'u-1',
           publicKey: 'GBPDX2DPUHABCGNHXQRNK5A6NGV5R7T244HJ5CXAWSWVRTZR4WMADE72',
           label: 'Treasury',
+          tags: [],
         },
       });
     });
@@ -117,6 +119,34 @@ describe('WalletsService', () => {
       vi.mocked(prisma.wallet.findUnique).mockResolvedValue({ id: 'w-1', userId: 'someone-else', cursor: null } as any);
 
       await expect(walletsService.getIngestionStatus('u-1', 'w-1')).rejects.toThrow('Wallet not found');
+    });
+  });
+
+  describe('updateWalletMetadata', () => {
+    it('updates nickname, color, and normalized tags while preserving existing metadata', async () => {
+      vi.mocked(prisma.wallet.findUnique).mockResolvedValue({
+        id: 'w-1', userId: 'u-1', metadata: { source: 'import' },
+      } as any);
+      const updated = { id: 'w-1', metadata: { source: 'import', nickname: 'Treasury', colorHex: '#112233', tags: ['Payroll'] }, tags: ['Payroll'] };
+      vi.mocked(prisma.wallet.update).mockResolvedValue(updated as any);
+
+      const result = await walletsService.updateWalletMetadata('u-1', 'w-1', {
+        nickname: 'Treasury', colorHex: '#112233', tags: [' Payroll ', 'payroll'],
+      });
+
+      expect(prisma.wallet.update).toHaveBeenCalledWith({
+        where: { id: 'w-1' },
+        data: { metadata: updated.metadata, tags: ['Payroll'] },
+      });
+      expect(result).toEqual(updated);
+    });
+
+    it('does not update wallets owned by another user', async () => {
+      vi.mocked(prisma.wallet.findUnique).mockResolvedValue({ id: 'w-1', userId: 'other-user' } as any);
+
+      await expect(walletsService.updateWalletMetadata('u-1', 'w-1', { nickname: 'Private' }))
+        .rejects.toThrow('Wallet not found');
+      expect(prisma.wallet.update).not.toHaveBeenCalled();
     });
   });
 

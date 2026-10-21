@@ -125,6 +125,8 @@ export const WalletScalarFieldEnum = {
   userId: 'userId',
   publicKey: 'publicKey',
   label: 'label',
+  tags: 'tags',
+  metadata: 'metadata',
   createdAt: 'createdAt'
 } as const
 
@@ -168,6 +170,7 @@ export const OutboxEventScalarFieldEnum = {
   id: 'id',
   eventType: 'eventType',
   aggregateId: 'aggregateId',
+  idempotencyKey: 'idempotencyKey',
   payload: 'payload',
   status: 'status',
   attempts: 'attempts',
