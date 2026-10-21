@@ -1,6 +1,8 @@
-import fp from 'fastify-plugin';
-import { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import { renderWebhookDispatchMetrics } from '../lib/webhook-metrics';
+import fp from "fastify-plugin";
+import { FastifyInstance, FastifyPluginAsync } from "fastify";
+import { renderWebhookDispatchMetrics } from "../lib/webhook-metrics";
+import { prometheusMetricsService } from "../modules/metrics/prometheus.service";
+import { env } from "../config/env";
 
 export interface QueueMetricsSnapshot {
   queueName: string;
@@ -12,8 +14,10 @@ export interface QueueMetricsSnapshot {
   activeWorkers: number;
 }
 
-export function generatePrometheusMetrics(snapshot?: Partial<QueueMetricsSnapshot>): string {
-  const qName = snapshot?.queueName || 'webhooks';
+export function generatePrometheusMetrics(
+  snapshot?: Partial<QueueMetricsSnapshot>,
+): string {
+  const qName = snapshot?.queueName || "webhooks";
   const waiting = snapshot?.waitingCount ?? 0;
   const active = snapshot?.activeCount ?? 0;
   const completed = snapshot?.completedCount ?? 0;
@@ -25,53 +29,68 @@ export function generatePrometheusMetrics(snapshot?: Partial<QueueMetricsSnapsho
   const uptime = process.uptime();
 
   return [
-    '# HELP stellar_alerts_queue_waiting_jobs Number of waiting jobs in BullMQ queue',
-    '# TYPE stellar_alerts_queue_waiting_jobs gauge',
+    "# HELP stellar_alerts_queue_waiting_jobs Number of waiting jobs in BullMQ queue",
+    "# TYPE stellar_alerts_queue_waiting_jobs gauge",
     `stellar_alerts_queue_waiting_jobs{queue="${qName}"} ${waiting}`,
-    '',
-    '# HELP stellar_alerts_queue_active_jobs Number of currently processing jobs',
-    '# TYPE stellar_alerts_queue_active_jobs gauge',
+    "",
+    "# HELP stellar_alerts_queue_active_jobs Number of currently processing jobs",
+    "# TYPE stellar_alerts_queue_active_jobs gauge",
     `stellar_alerts_queue_active_jobs{queue="${qName}"} ${active}`,
-    '',
-    '# HELP stellar_alerts_queue_completed_jobs_total Total completed jobs',
-    '# TYPE stellar_alerts_queue_completed_jobs_total counter',
+    "",
+    "# HELP stellar_alerts_queue_completed_jobs_total Total completed jobs",
+    "# TYPE stellar_alerts_queue_completed_jobs_total counter",
     `stellar_alerts_queue_completed_jobs_total{queue="${qName}"} ${completed}`,
-    '',
-    '# HELP stellar_alerts_queue_failed_jobs_total Total failed jobs',
-    '# TYPE stellar_alerts_queue_failed_jobs_total counter',
+    "",
+    "# HELP stellar_alerts_queue_failed_jobs_total Total failed jobs",
+    "# TYPE stellar_alerts_queue_failed_jobs_total counter",
     `stellar_alerts_queue_failed_jobs_total{queue="${qName}"} ${failed}`,
-    '',
-    '# HELP stellar_alerts_worker_processing_latency_ms Average job processing latency in milliseconds',
-    '# TYPE stellar_alerts_worker_processing_latency_ms gauge',
+    "",
+    "# HELP stellar_alerts_worker_processing_latency_ms Average job processing latency in milliseconds",
+    "# TYPE stellar_alerts_worker_processing_latency_ms gauge",
     `stellar_alerts_worker_processing_latency_ms{queue="${qName}"} ${latency}`,
-    '',
-    '# HELP stellar_alerts_active_workers_count Active worker pods/instances',
-    '# TYPE stellar_alerts_active_workers_count gauge',
+    "",
+    "# HELP stellar_alerts_active_workers_count Active worker pods/instances",
+    "# TYPE stellar_alerts_active_workers_count gauge",
     `stellar_alerts_active_workers_count ${workers}`,
-    '',
-    '# HELP process_uptime_seconds Process uptime in seconds',
-    '# TYPE process_uptime_seconds gauge',
+    "",
+    "# HELP process_uptime_seconds Process uptime in seconds",
+    "# TYPE process_uptime_seconds gauge",
     `process_uptime_seconds ${uptime.toFixed(1)}`,
-    '',
-    '# HELP nodejs_heap_used_bytes Process heap memory used in bytes',
-    '# TYPE nodejs_heap_used_bytes gauge',
+    "",
+    "# HELP nodejs_heap_used_bytes Process heap memory used in bytes",
+    "# TYPE nodejs_heap_used_bytes gauge",
     `nodejs_heap_used_bytes ${mem.heapUsed}`,
-    '',
-    // Per-phase outbound webhook dispatch histograms (DNS / TCP / TLS / TTFB /
-    // response stream). Appended last so existing consumers of the queue
-    // metrics keep parsing an unchanged prefix.
+    "",
+    // Webhook dispatch phase/outcome metrics
     renderWebhookDispatchMetrics(),
-    '',
-  ].join('\n');
+    "",
+    // SLO and delivery metrics from PrometheusMetricsService
+    prometheusMetricsService.render(),
+  ].join("\n");
 }
 
 const metricsPlugin: FastifyPluginAsync = async (fastify: FastifyInstance) => {
-  fastify.get('/metrics', async (request, reply) => {
-    reply.header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  fastify.get("/metrics", async (request, reply) => {
+    // Optional bearer token authentication for production
+    if (env.METRICS_AUTH_TOKEN && env.NODE_ENV === "production") {
+      const authHeader = request.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        reply.code(401);
+        return { error: "Unauthorized" };
+      }
+
+      const token = authHeader.slice(7);
+      if (token !== env.METRICS_AUTH_TOKEN) {
+        reply.code(403);
+        return { error: "Forbidden" };
+      }
+    }
+
+    reply.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
     return generatePrometheusMetrics();
   });
 };
 
 export default fp(metricsPlugin, {
-  name: 'metrics-plugin',
+  name: "metrics-plugin",
 });
