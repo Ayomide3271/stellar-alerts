@@ -41,6 +41,34 @@ import { AppError } from "./lib/errors";
 
 export { openApiComponentSchemas, openApiOptions } from "./openapi.config";
 
+type DeepHealthCheckStatus = "ok" | "error";
+
+const DEFAULT_DEEP_HEALTH_TIMEOUT_MS = 5_000;
+
+async function runDeepHealthCheck(
+  check: () => Promise<unknown>,
+  timeoutMs = env.DEEP_HEALTH_TIMEOUT_MS ?? DEFAULT_DEEP_HEALTH_TIMEOUT_MS,
+): Promise<DeepHealthCheckStatus> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    await Promise.race([
+      check(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Deep health check timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return "ok";
+  } catch {
+    return "error";
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export const buildApp = async () => {
   // Issue #19: Correlation IDs — read x-request-id header or generate a UUID
   const app = Fastify({
@@ -100,45 +128,28 @@ export const buildApp = async () => {
     return { status: "ok" };
   });
 
-  // Issue #18: Deep Health Inspection Probe — no authentication required
+  // Issue #18 / #566: Deep Health Inspection Probe — no authentication required.
+  // Every dependency probe is bounded by a deadline so a hung Postgres, Redis,
+  // or Horizon connection can never stall a load balancer's health check.
   app.get("/health/deep", async (_req, reply) => {
-    const checks: {
-      postgres: "ok" | "error";
-      redis: "ok" | "error";
-      horizon: "ok" | "error";
-    } = {
-      postgres: "error",
-      redis: "error",
-      horizon: "error",
-    };
-
-    // PostgreSQL ping
-    try {
-      await prisma.$queryRaw`SELECT 1`;
-      checks.postgres = "ok";
-    } catch {
-      // leave as 'error'
-    }
-
-    // Redis ping via BullMQ queue's underlying ioredis client
-    try {
-      if (alertQueue && alertQueue.client) {
+    const [postgres, redis, horizon] = await Promise.all([
+      // PostgreSQL ping
+      runDeepHealthCheck(() => prisma.$queryRaw`SELECT 1`),
+      // Redis ping via BullMQ queue's underlying ioredis client.
+      // `Queue.client` is a promise in BullMQ, so it must be awaited before
+      // calling PING.
+      runDeepHealthCheck(async () => {
+        if (!alertQueue || !alertQueue.client) {
+          throw new Error("Redis queue client is not available");
+        }
         const redisClient = await alertQueue.client;
         await (redisClient as any).ping();
-        checks.redis = "ok";
-      }
-    } catch {
-      // leave as 'error'
-    }
+      }),
+      // Horizon / Soroban RPC ping
+      runDeepHealthCheck(() => sorobanServer.getLatestLedger()),
+    ]);
 
-    // Horizon / Soroban RPC ping
-    try {
-      await sorobanServer.getLatestLedger();
-      checks.horizon = "ok";
-    } catch {
-      // leave as 'error'
-    }
-
+    const checks = { postgres, redis, horizon };
     const allOk =
       checks.postgres === "ok" &&
       checks.redis === "ok" &&

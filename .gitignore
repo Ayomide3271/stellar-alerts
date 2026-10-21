@@ -1,5 +1,4 @@
 node_modules
-.env
 dist
 build
 .next
@@ -49,3 +48,4 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+config.bat
