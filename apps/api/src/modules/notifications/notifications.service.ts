@@ -1,8 +1,8 @@
 /**
  * Notifications Service
- * 
+ *
  * Handles notification preference updates with MFA protection and multi-channel support:
- * Telegram, Email, WhatsApp, Discord, Slack, and Push Protocol.
+ * Telegram, Email, WhatsApp, Discord, Slack, Push Protocol, PagerDuty, and Opsgenie.
  */
 
 import { Prisma } from '../../../generated/prisma/client';
@@ -13,7 +13,10 @@ import { isValidE164Number } from '../../utils/whatsapp';
 import { isValidSlackWebhookUrl } from '../../utils/slack';
 import { ValidationError } from '../../lib/errors';
 import { dispatchPushNotification } from '../../utils/push-protocol';
+security/issue-723-200-pts-notifications-native-pagerduty-opsgenie
+
 import { slackNotificationProvider } from './providers/slack.provider';
+contribution
 import { logger } from '../../lib/logger';
 
 export function isValidDiscordWebhookUrl(url: string): boolean {
@@ -41,6 +44,10 @@ export interface NotificationPreferences {
   slackEnabled?: boolean;
   pushChannelAddress?: string | null;
   pushEnabled?: boolean;
+  pagerDutyRoutingKey?: string | null;
+  pagerDutyEnabled?: boolean;
+  opsgenieApiKey?: string | null;
+  opsgenieEnabled?: boolean;
   enabledChannels?: string[];
   assetFilters?: string[];
   minAmount?: number | string | null;
@@ -114,6 +121,22 @@ export class NotificationsService {
       }
     }
 
+    // Validate PagerDuty routing key if supplied
+    if (preferences.pagerDutyRoutingKey !== undefined && preferences.pagerDutyRoutingKey !== null && preferences.pagerDutyRoutingKey !== '') {
+      const { pagerDutyProvider } = await import('./providers/pagerduty.provider');
+      if (!pagerDutyProvider.isValidRoutingKey(preferences.pagerDutyRoutingKey)) {
+        throw new ValidationError('Invalid PagerDuty routing key. Must be a 32-character integration key.', undefined, 'INVALID_PAGERDUTY_ROUTING_KEY');
+      }
+    }
+
+    // Validate Opsgenie API key if supplied
+    if (preferences.opsgenieApiKey !== undefined && preferences.opsgenieApiKey !== null && preferences.opsgenieApiKey !== '') {
+      const { opsgenieProvider } = await import('./providers/opsgenie.provider');
+      if (!opsgenieProvider.isValidApiKey(preferences.opsgenieApiKey)) {
+        throw new ValidationError('Invalid Opsgenie API key.', undefined, 'INVALID_OPSGENIE_API_KEY');
+      }
+    }
+
     // Validate receipt preference
     if (preferences.receiptPreference !== undefined && preferences.receiptPreference !== null) {
       const allowedReceipts = ['instant', 'daily_digest', 'summary'];
@@ -156,7 +179,7 @@ export class NotificationsService {
       if (!Array.isArray(preferences.enabledChannels)) {
         throw new ValidationError('enabledChannels must be an array.', undefined, 'INVALID_ENABLED_CHANNELS');
       }
-      const allowedChannels = ['telegram', 'email', 'whatsapp', 'discord', 'slack', 'push'];
+      const allowedChannels = ['telegram', 'email', 'whatsapp', 'discord', 'slack', 'push', 'pagerduty', 'opsgenie'];
       for (const ch of preferences.enabledChannels) {
         if (!allowedChannels.includes(ch)) {
           throw new ValidationError(`Unknown channel in enabledChannels: ${ch}`, undefined, 'INVALID_CHANNEL_NAME');
@@ -174,6 +197,8 @@ export class NotificationsService {
       slackEnabled: preferences.slackEnabled,
       pushChannelAddress: preferences.pushChannelAddress,
       pushEnabled: preferences.pushEnabled,
+      pagerDutyEnabled: preferences.pagerDutyEnabled,
+      opsgenieEnabled: preferences.opsgenieEnabled,
       receiptPreference: preferences.receiptPreference,
       digestFrequency: preferences.digestFrequency,
       assetFilters: preferences.assetFilters,
@@ -195,6 +220,18 @@ export class NotificationsService {
       dataToSave.whatsappNumber = preferences.whatsappNumber
         ? encryptPersonalField(preferences.whatsappNumber)
         : preferences.whatsappNumber;
+    }
+
+    if (preferences.pagerDutyRoutingKey !== undefined) {
+      dataToSave.pagerDutyRoutingKey = preferences.pagerDutyRoutingKey
+        ? encryptPersonalField(preferences.pagerDutyRoutingKey)
+        : preferences.pagerDutyRoutingKey;
+    }
+
+    if (preferences.opsgenieApiKey !== undefined) {
+      dataToSave.opsgenieApiKey = preferences.opsgenieApiKey
+        ? encryptPersonalField(preferences.opsgenieApiKey)
+        : preferences.opsgenieApiKey;
     }
 
     // Clean undefined fields for Prisma
@@ -232,6 +269,8 @@ export class NotificationsService {
       ...pref,
       telegramChatId: decryptPersonalField(pref.telegramChatId),
       whatsappNumber: decryptPersonalField(pref.whatsappNumber),
+      pagerDutyRoutingKey: decryptPersonalField((pref as any).pagerDutyRoutingKey),
+      opsgenieApiKey: decryptPersonalField((pref as any).opsgenieApiKey),
       minAmount: pref.minAmount ? pref.minAmount.toString() : null,
     };
   }
@@ -311,13 +350,78 @@ export class NotificationsService {
   }
 
   /**
-   * Dispatch an interactive Slack Block Kit notification (#637).
+   * Dispatch a PagerDuty incident trigger (Events API v2) for a security alert.
+   * Maps alert severity (critical/error/warning) to PagerDuty severity and
+   * derives a stable deduplication key so repeated alerts collapse into one
+   * incident.
    */
-  async dispatchSlackNotification(
-    target: { webhookUrl?: string; botToken?: string; channel?: string },
-    data: Parameters<typeof slackNotificationProvider.buildBlockKitPayload>[0],
+  async dispatchPagerDutyIncident(
+    target: { routingKey?: string },
+    alert: {
+      severity: 'critical' | 'error' | 'warning';
+      summary: string;
+      source?: string;
+      dedupKey?: string;
+      component?: string;
+      group?: string;
+      class?: string;
+      customDetails?: Record<string, unknown>;
+      links?: Array<{ href: string; text?: string }>;
+    },
   ) {
-    return slackNotificationProvider.dispatch(target, data);
+    const { pagerDutyProvider } = await import('./providers/pagerduty.provider');
+    return pagerDutyProvider.trigger(target, alert);
+  }
+
+  /**
+   * Dispatch an Opsgenie alert for a security alert.
+   * Maps alert severity to Opsgenie priority (P1-P5) and attaches tags.
+   */
+  async dispatchOpsgenieAlert(
+    target: { apiKey?: string },
+    alert: {
+      severity: 'critical' | 'error' | 'warning';
+      message: string;
+      alias?: string;
+      description?: string;
+      source?: string;
+      tags?: string[];
+      details?: Record<string, string>;
+      responders?: Array<Record<string, unknown>>;
+    },
+  ) {
+    const { opsgenieProvider } = await import('./providers/opsgenie.provider');
+    return opsgenieProvider.createAlert(target, alert);
+  }
+
+  /**
+   * Trigger the 24-hour transaction & security digest for a single user.
+   * Respects the user's digest frequency setting (daily/weekly/off).
+   *
+   * @param userId - User ID
+   * @param options - Optional overrides (e.g. force send for testing)
+   */
+  async sendDigest(
+    userId: string,
+    options: { force?: boolean } = {}
+  ): Promise<{ sent: boolean; reason?: string }> {
+    const prefs = await prisma.notificationPreference.findUnique({ where: { userId } });
+    if (!prefs) {
+      return { sent: false, reason: 'no_preferences' };
+    }
+    // Lazy-load the digest worker so a broken/missing worker module cannot
+    // break this service at import time.
+    try {
+      const mod = await import('../../workers/digest.worker');
+      const digestWorker = (mod as any)?.digestWorker;
+      if (!digestWorker || typeof digestWorker.processUser !== 'function') {
+        return { sent: false, reason: 'digest_worker_unavailable' };
+      }
+      return await digestWorker.processUser(userId, prefs, options);
+    } catch (error: any) {
+      logger.warn?.('[NotificationsService] digest worker unavailable', error?.message);
+      return { sent: false, reason: error?.message || 'digest_worker_unavailable' };
+    }
   }
 
   /**
