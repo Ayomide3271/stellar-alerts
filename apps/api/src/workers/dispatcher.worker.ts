@@ -2,12 +2,7 @@ import { Job, Worker, Queue } from 'bullmq';
 import { redis, registerRedisCleanupTask } from '../lib/redis';
 import { createLogger } from '../lib/logger';
 import { RedisCircuitBreaker, CircuitBreakerOpenError } from '../modules/alerts/circuit-breaker';
-import {
-  SsrfFilter,
-  ssrfFilter as defaultSsrfFilter,
-  SsrfBlockedError,
-  PinnedWebhookTarget,
-} from '../modules/webhooks/ssrf-filter';
+import { webhookTelemetry } from '../modules/webhooks/webhook-telemetry';
 
 const log = createLogger({ module: 'WebhookDispatcherWorker' });
 
@@ -24,6 +19,7 @@ export interface WebhookDispatchResult {
   webhookId: string;
   status: 'delivered' | 'skipped' | 'failed';
   statusCode?: number;
+  durationMs?: number;
   reason?: string;
   pinnedIp?: string;
 }
@@ -115,24 +111,28 @@ export class DispatcherWorker {
 
     try {
       const payloadStr = JSON.stringify(payload);
-      const res = await this.circuitBreaker.execute(webhookId, async () => {
-        const response =
-          this.transport.length >= 4
-            ? await this.transport(url, payloadStr, headers, pinnedTarget)
-            : await this.transport(url, payloadStr, headers);
-        if (response.status >= 500) {
-          const err: any = new Error(`Server returned HTTP ${response.status}`);
-          err.statusCode = response.status;
-          throw err;
-        }
-        return response;
-      });
+      const { result: res, durationMs } = await webhookTelemetry.measureDispatch(
+        webhookId,
+        url,
+        async () => {
+          return await this.circuitBreaker.execute(webhookId, async () => {
+            const response = await this.transport(url, payloadStr, headers);
+            if (response.status >= 500) {
+              const err: any = new Error(`Server returned HTTP ${response.status}`);
+              err.statusCode = response.status;
+              throw err;
+            }
+            return response;
+          });
+        },
+        paymentId
+      );
 
       return {
         webhookId,
         status: 'delivered',
         statusCode: res.status,
-        pinnedIp: pinnedTarget.pinnedIp,
+        durationMs,
       };
     } catch (err: any) {
       if (err instanceof CircuitBreakerOpenError) {
