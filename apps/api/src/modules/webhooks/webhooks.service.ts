@@ -10,6 +10,11 @@ import {
   CURSOR_ORDER_BY,
   CursorError,
 } from '../../utils/pagination';
+import {
+  replayDefense,
+  type ReplayCheckContext,
+  type ReplayCheckResult,
+} from './replay-defense';
 
 export interface WebhookTestResult {
   success: boolean;
@@ -32,6 +37,22 @@ const WEBHOOK_TEST_TIMEOUT_MS = 10_000;
 
 export class WebhooksService {
   private keyRotationManager = new KeyRotationManager();
+
+  /**
+   * Enforces replay defense (#718) for inbound signed webhook / API-webhook
+   * requests: the presented nonce must be unseen (consumed in Redis with a
+   * 5-minute TTL) and the timestamp must sit inside the ±30s drift window.
+   *
+   * Throws a 401 AuthenticationError (and writes a HIGH-severity
+   * WEBHOOK_REPLAY_ATTEMPT audit entry) on rejection.
+   */
+  public async assertNoReplay(input: {
+    nonce?: string | null;
+    timestamp?: string | number | null;
+    context?: ReplayCheckContext;
+  }): Promise<Extract<ReplayCheckResult, { ok: true }>> {
+    return replayDefense.assertFresh(input);
+  }
 
   /**
    * Computes the 7-day delivery success rate and latency health scorecard for a webhook.
