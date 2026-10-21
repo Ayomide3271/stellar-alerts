@@ -37,7 +37,7 @@ function isRuleGroup(rule: FilterRule | FilterRuleGroup): rule is FilterRuleGrou
 function parseJsonPath(path: string): Array<string | number | '*'> {
   const normalized = path.startsWith('$.') ? path.slice(2) : path.startsWith('$') ? path.slice(1) : path;
   const tokens: Array<string | number | '*'> = [];
-  const matcher = /\.?(?<key>[^.\[\]]+)|\[(?<index>\d+|\*|"[^"]+"|'[^']+')\]/g;
+  const matcher = /\.?(?<key>[^.\[\]]+)|\[(?<index>\d+|\$|"[^"]+"|'[^']+')\]/g;
   let match: RegExpExecArray | null;
 
   while ((match = matcher.exec(normalized)) !== null) {
@@ -219,7 +219,7 @@ export function createAssetFilterRule(allowedAssets: string[]): FilterRuleGroup 
 
   return {
     operator: 'OR',
-    rules: allowedAssets.map(asset => ({
+    rules: allowedAssets.map((asset) => ({
       field: 'asset' as const,
       operator: 'eq' as const,
       value: asset,

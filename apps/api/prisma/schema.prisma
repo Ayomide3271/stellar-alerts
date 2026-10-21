@@ -87,6 +87,28 @@ model Payment {
   @@index([walletId])
   @@index([asset])
   @@index([walletId, receivedAt])
+  @@index([createdAt])
+}
+
+// Cold storage for payments older than 90 days, partitioned for archival
+model PaymentArchive {
+  id          String   @id @default(cuid())
+  walletId    String
+  txHash      String   @unique
+  fromAddress String
+  amount      Decimal
+  asset       String
+  assetIssuer String?
+  memo        String?
+  receivedAt  DateTime
+  createdAt   DateTime @default(now())
+  archivedAt  DateTime @default(now())
+
+  @@index([walletId])
+  @@index([asset])
+  @@index([walletId, receivedAt])
+  @@index([createdAt])
+  @@index([archivedAt])
 }
 
 model OutboxEvent {

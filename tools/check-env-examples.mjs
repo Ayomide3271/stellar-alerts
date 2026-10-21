@@ -81,6 +81,8 @@ export const ENV_EXAMPLES = Object.freeze([
       'WASM_ANALYZER_MAX_UPLOAD_BYTES',
       'WASM_ANALYZER_TIMEOUT_MS',
       'WATCHER_WALLET_CONCURRENCY',
+      'WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS',
+      'WEBHOOK_REPLAY_NONCE_TTL_SECONDS',
       'WEBHOOK_TIMEOUT_MS',
     ]),
     requiredKeys: Object.freeze([

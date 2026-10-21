@@ -9,6 +9,7 @@
 
 import http from 'node:http';
 import { renderWebhookDispatchMetrics } from './webhook-metrics';
+import { renderQueueLaneMetrics } from './queue-lanes';
 import { createLogger } from './logger';
 
 const log = createLogger({ module: 'WorkerMetrics' });
@@ -34,7 +35,7 @@ export async function startWorkerMetricsServer(port: number | undefined): Promis
     }
 
     res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
-    res.end(`${renderWebhookDispatchMetrics()}\n`);
+    res.end(`${renderWebhookDispatchMetrics()}\n${renderQueueLaneMetrics()}\n`);
   });
 
   await new Promise<void>((resolve, reject) => {
