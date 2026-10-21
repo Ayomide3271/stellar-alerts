@@ -39,7 +39,7 @@ model Wallet {
   publicKey  String           @unique
   label      String?
   tags       String[]         @default([])
-  deletedAt  DateTime?
+  metadata   Json             @default("{}")
   createdAt   DateTime         @default(now())
   payments   Payment[]
   cursor     IngestionCursor?

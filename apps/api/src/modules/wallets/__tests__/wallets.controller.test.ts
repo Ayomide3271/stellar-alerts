@@ -8,6 +8,7 @@ vi.mock('../wallets.service', () => ({
   walletsService: {
     addWallet: vi.fn(),
     getWallets: vi.fn(),
+    updateWalletMetadata: vi.fn(),
     getIngestionStatus: vi.fn(),
     removeWallet: vi.fn(),
   },
@@ -114,6 +115,29 @@ describe('WalletsController', () => {
       expect(error).toBeInstanceOf(NotFoundError);
       expect(error.statusCode).toBe(404);
       expect(error.message).toBe('Wallet not found');
+    });
+  });
+
+  describe('updateWalletMetadata', () => {
+    it('updates metadata for the authenticated user and returns the wallet', async () => {
+      mockRequest = { user: { id: 'u-1' }, params: { id: 'w-1' }, body: { nickname: 'Treasury' } };
+      const wallet = { id: 'w-1', metadata: { nickname: 'Treasury' } };
+      vi.mocked(walletsService.updateWalletMetadata).mockResolvedValue(wallet as any);
+
+      await walletsController.updateWalletMetadata(mockRequest, mockReply);
+
+      expect(walletsService.updateWalletMetadata).toHaveBeenCalledWith('u-1', 'w-1', { nickname: 'Treasury' });
+      expect(mockReply.send).toHaveBeenCalledWith({ success: true, wallet });
+    });
+
+    it('returns 404 when the wallet is not owned by the requester', async () => {
+      mockRequest = { user: { id: 'u-1' }, params: { id: 'w-other' }, body: { tags: ['Treasury'] } };
+      vi.mocked(walletsService.updateWalletMetadata).mockRejectedValue(new Error('Wallet not found'));
+
+      const error = await walletsController.updateWalletMetadata(mockRequest, mockReply).catch((e) => e);
+
+      expect(error).toBeInstanceOf(NotFoundError);
+      expect(error.statusCode).toBe(404);
     });
   });
 

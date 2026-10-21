@@ -82,6 +82,12 @@
           "label": {
             "type": "string"
           },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "zkProof": {},
           "publicSignals": {
             "type": "array",

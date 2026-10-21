@@ -4,6 +4,7 @@ import {
   createWalletSchema,
   deleteWalletSchema,
   listWalletsQuerySchema,
+  updateWalletMetadataSchema,
   updateWalletTagsSchema,
 } from './wallets.schema';
 import { walletsService } from './wallets.service';
@@ -77,6 +78,29 @@ export class WalletsController {
     const userId = (request as any).user.id;
     try {
       const wallet = await walletsService.updateWalletTags(userId, params.data.id, body.data.tags);
+      return reply.send({ success: true, wallet });
+    } catch (error: any) {
+      if (error.message === 'Wallet not found') {
+        throw new NotFoundError(error.message);
+      }
+      throw error;
+    }
+  }
+
+  async updateWalletMetadata(request: FastifyRequest, reply: FastifyReply) {
+    const params = deleteWalletSchema.safeParse(request.params);
+    if (!params.success) {
+      throw zodValidationError(params, 'Invalid parameters');
+    }
+
+    const body = updateWalletMetadataSchema.safeParse(request.body);
+    if (!body.success) {
+      throw zodValidationError(body, 'Invalid payload');
+    }
+
+    const userId = (request as any).user.id;
+    try {
+      const wallet = await walletsService.updateWalletMetadata(userId, params.data.id, body.data);
       return reply.send({ success: true, wallet });
     } catch (error: any) {
       if (error.message === 'Wallet not found') {
