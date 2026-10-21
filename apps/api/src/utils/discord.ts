@@ -1,3 +1,6 @@
+import { env } from '../config/env';
+import { fetchWithTimeout } from '../lib/external-request';
+
 export interface DiscordAlertData {
   paymentId: string;
   txHash: string;
@@ -214,11 +217,19 @@ export function buildDiscordEmbed(
   return payload;
 }
 
-import { env } from '../config/env';
-import { fetchWithTimeout } from '../lib/external-request';
+export function parseDiscordWebhookUrls(rawUrls: string | string[]): string[] {
+  if (Array.isArray(rawUrls)) {
+    return rawUrls.map((u) => u.trim()).filter((u) => u.length > 0 && (u.startsWith('http://') || u.startsWith('https://')));
+  }
+  if (!rawUrls || typeof rawUrls !== 'string') return [];
+  return rawUrls
+    .split(/[\r\n,;]+/)
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0 && (u.startsWith('http://') || u.startsWith('https://')));
+}
 
 export async function dispatchDiscordAlert(
-  webhookUrl: string,
+  webhookUrl: string | string[],
   data: DiscordAlertData,
   options: {
     timeoutMs?: number;
@@ -228,31 +239,44 @@ export async function dispatchDiscordAlert(
     components?: DiscordActionRow[];
   } = {},
 ): Promise<boolean> {
+  const urls = parseDiscordWebhookUrls(webhookUrl);
+  if (urls.length === 0) {
+    console.warn(`[Discord] No valid webhook URLs provided for payment ${data.paymentId}`);
+    return false;
+  }
+
   const components =
     options.components ?? (options.alertId ? buildDiscordAlertComponents(options.alertId) : undefined);
   const payload = buildDiscordEmbed(data, { components });
   const timeoutMs = options.timeoutMs ?? env.NOTIFICATION_PROVIDER_TIMEOUT_MS;
 
-  try {
-    const response = await fetchWithTimeout(
-      webhookUrl,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      },
-      timeoutMs,
-      options.signal,
-      'Discord',
-    );
+  const results = await Promise.allSettled(
+    urls.map(async (url) => {
+      try {
+        const response = await fetchWithTimeout(
+          url,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+          timeoutMs,
+          options.signal,
+          'Discord',
+        );
 
-    if (!response.ok) {
-      console.warn(`[Discord] Webhook responded with status ${response.status} for payment ${data.paymentId}`);
-    }
+        if (!response.ok) {
+          console.warn(`[Discord] Webhook responded with status ${response.status} for payment ${data.paymentId} at ${url}`);
+        }
 
-    return response.ok;
-  } catch (error: any) {
-    console.error(`[Discord] Failed to dispatch embed for payment ${data.paymentId}:`, error.message);
-    return false;
-  }
+        return response.ok;
+      } catch (error: any) {
+        console.error(`[Discord] Failed to dispatch embed for payment ${data.paymentId} to ${url}:`, error.message);
+        return false;
+      }
+    }),
+  );
+
+  return results.some((r) => r.status === 'fulfilled' && r.value === true);
 }
+

@@ -59,9 +59,8 @@ export interface AlertJobData {
 
 const redisHost = process.env.REDIS_HOST || "localhost";
 const redisPort = parseInt(process.env.REDIS_PORT || "6379", 10);
-const WEBHOOK_TIMEOUT_MS = 10000;
-const CIRCUIT_BREAKER_THRESHOLD = 10; // 10 consecutive 5xx failures opens circuit
-const CIRCUIT_BREAKER_TIMEOUT = 60000; // 60 second timeout before half-open
+export const CIRCUIT_BREAKER_THRESHOLD = 10; // 10 consecutive 5xx failures opens circuit
+export const CIRCUIT_BREAKER_TIMEOUT = 60000; // 60 second timeout before half-open
 
 export let alertQueue: Queue<AlertJobData> | null = null;
 export let dlqQueue: Queue<AlertJobData> | null = null;
@@ -69,9 +68,9 @@ export let alertQueueEvents: QueueEvents | null = null;
 export let alertWorker: Worker<AlertJobData> | null = null;
 export let queueLaneManager: QueueLaneManager | null = null;
 
-const circuitBreakers = new Map<string, CircuitBreaker<any>>();
+export const circuitBreakers = new Map<string, CircuitBreaker<any>>();
 
-interface CircuitBreakerState {
+export interface CircuitBreakerState {
   state: "closed" | "open" | "half-open";
   failureCount: number;
   openedAt?: number;
@@ -158,7 +157,7 @@ async function assertBotIsChannelAdmin(botToken: string, chatId: string): Promis
   }
 }
 
-async function getOrCreateCircuitBreaker(
+export async function getOrCreateCircuitBreaker(
   webhookId: string,
 ): Promise<CircuitBreaker<any>> {
   if (circuitBreakers.has(webhookId)) {
@@ -190,17 +189,23 @@ async function getOrCreateCircuitBreaker(
       }
 
       if (response.status >= 500) {
-        throw new Error(`Server error: ${response.status}`);
+        const error = new Error(`Server error: ${response.status}`) as Error & {
+          statusCode?: number;
+        };
+        error.statusCode = response.status;
+        throw error;
       }
 
       return response;
     },
     {
-      timeout: WEBHOOK_TIMEOUT_MS,
+      timeout: env.WEBHOOK_TIMEOUT_MS || 10000,
       errorThresholdPercentage: 100,
       volumeThreshold: CIRCUIT_BREAKER_THRESHOLD,
+      resetTimeout: CIRCUIT_BREAKER_TIMEOUT,
       rollingCountTimeout: 60000,
       name: `webhook-${webhookId}`,
+      errorFilter: (err: any) => err?.statusCode === 429 || err?.message?.includes("Rate limited"),
     },
   );
 
@@ -217,34 +222,24 @@ async function getOrCreateCircuitBreaker(
     console.log(`[CircuitBreaker] Initialized webhook ${webhookId} with Redis state: ${redisState.state}`);
   }
 
-  // Add event listeners to sync state changes to Redis
-  breaker.on('open', () => {
-    syncCircuitBreakerStateToRedis(webhookId, {
-      state: 'open',
-      failureCount: CIRCUIT_BREAKER_THRESHOLD,
-      openedAt: Date.now(),
-    });
+  // Add event listeners to sync state changes to Redis and DB
+  breaker.on('open', async () => {
+    await updateCircuitBreakerState(webhookId, 'open', CIRCUIT_BREAKER_THRESHOLD);
   });
 
-  breaker.on('halfOpen', () => {
-    syncCircuitBreakerStateToRedis(webhookId, {
-      state: 'half-open',
-      failureCount: 0,
-    });
+  breaker.on('halfOpen', async () => {
+    await updateCircuitBreakerState(webhookId, 'half-open', 0);
   });
 
-  breaker.on('close', () => {
-    syncCircuitBreakerStateToRedis(webhookId, {
-      state: 'closed',
-      failureCount: 0,
-    });
+  breaker.on('close', async () => {
+    await updateCircuitBreakerState(webhookId, 'closed', 0);
   });
 
   circuitBreakers.set(webhookId, breaker);
   return breaker;
 }
 
-async function updateCircuitBreakerState(
+export async function updateCircuitBreakerState(
   webhookId: string,
   state: "closed" | "open" | "half-open",
   failureCount: number = 0,
@@ -975,6 +970,11 @@ export async function enqueuePaymentAlert(data: AlertJobData) {
   try {
     const job = await alertQueue.add("dispatch-alert", data, {
       jobId: `payment-${data.txHash}`,
+      attempts: 5,
+      backoff: {
+        type: "exponential",
+        delay: 2000,
+      },
     });
     queueLog.info({ jobId: job.id, txHash: data.txHash, requestId: data.requestId }, '📨 Enqueued payment alert job');
     return job;
@@ -1011,6 +1011,11 @@ export async function enqueuePaymentAlertStrict(data: AlertJobData) {
 
   const job = await alertQueue.add("dispatch-alert", data, {
     jobId: `payment-${data.txHash}`,
+    attempts: 5,
+    backoff: {
+      type: "exponential",
+      delay: 2000,
+    },
   });
   if (!job?.id) {
     throw new Error(`BullMQ did not confirm alert job for ${data.txHash}`);
