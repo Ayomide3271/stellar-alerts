@@ -1,4 +1,11 @@
 import React, { useState } from 'react';
+import { WalletAuthModal } from '../auth/WalletAuthModal';
+import {
+  RuleMutationChallenge,
+  SignedRuleMutation,
+  WalletSignerFn,
+  buildRuleChangeChallenge,
+} from '../../lib/wallet/signature-guard';
 
 export type RuleField = 'amount' | 'asset' | 'sender';
 export type RuleLogic = 'AND' | 'OR';
@@ -21,7 +28,12 @@ export interface RuleAST {
 }
 
 interface RuleBuilderProps {
-  onSave: (ast: RuleAST) => void;
+  onSave: (ast: RuleAST, headers?: Record<string, string>) => void;
+  requireWalletSignature?: boolean;
+  walletPublicKey?: string;
+  walletSigner?: WalletSignerFn;
+  verifyCryptographically?: boolean;
+  apiEndpoint?: string;
 }
 
 const FIELD_LABELS: Record<RuleField, string> = {
@@ -80,11 +92,20 @@ export const validateConditions = (conditions: RuleCondition[]): Record<string, 
   return errors;
 };
 
-export const RuleBuilder: React.FC<RuleBuilderProps> = ({ onSave }) => {
+export const RuleBuilder: React.FC<RuleBuilderProps> = ({
+  onSave,
+  requireWalletSignature = false,
+  walletPublicKey = '',
+  walletSigner,
+  verifyCryptographically = false,
+  apiEndpoint,
+}) => {
   const [logic, setLogic] = useState<RuleLogic>('AND');
   const [conditions, setConditions] = useState<RuleCondition[]>([makeCondition()]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<RuleAST | null>(null);
+  const [pendingAst, setPendingAst] = useState<RuleAST | null>(null);
+  const [activeChallenge, setActiveChallenge] = useState<RuleMutationChallenge | null>(null);
 
   const updateCondition = (id: string, updates: Partial<RuleCondition>) => {
     setConditions((prev) =>
@@ -120,8 +141,50 @@ export const RuleBuilder: React.FC<RuleBuilderProps> = ({ onSave }) => {
       logic,
       conditions: conditions.map(({ field, operator, value }) => ({ field, operator, value })),
     };
+
+    if (requireWalletSignature) {
+      if (!walletPublicKey) {
+        setErrors({ _root: 'Connect a Stellar wallet before modifying sensitive rules.' });
+        return;
+      }
+      const challenge = buildRuleChangeChallenge({
+        action: 'rule.save',
+        payload: ast,
+        publicKey: walletPublicKey,
+      });
+      setPendingAst(ast);
+      setActiveChallenge(challenge);
+      return;
+    }
+
     setPreview(ast);
     onSave(ast);
+  };
+
+  const handleWalletConfirmed = async (
+    _signed: SignedRuleMutation,
+    headers: Record<string, string>
+  ) => {
+    if (!pendingAst) return;
+    if (apiEndpoint && typeof fetch === 'function') {
+      await fetch(apiEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...headers,
+        },
+        body: JSON.stringify(pendingAst),
+      });
+    }
+    setPreview(pendingAst);
+    onSave(pendingAst, headers);
+    setPendingAst(null);
+    setActiveChallenge(null);
+  };
+
+  const handleWalletCancelled = () => {
+    setPendingAst(null);
+    setActiveChallenge(null);
   };
 
   return (
@@ -256,6 +319,16 @@ export const RuleBuilder: React.FC<RuleBuilderProps> = ({ onSave }) => {
           </pre>
         </div>
       )}
+
+      <WalletAuthModal
+        isOpen={Boolean(activeChallenge)}
+        challenge={activeChallenge}
+        signer={walletSigner}
+        verifyCryptographically={verifyCryptographically}
+        onConfirm={handleWalletConfirmed}
+        onCancel={handleWalletCancelled}
+      />
     </div>
   );
 };
+

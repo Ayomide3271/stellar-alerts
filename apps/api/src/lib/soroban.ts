@@ -6,16 +6,17 @@ import {
   MerkleProofStep,
 } from "../utils/merkle-verifier";
 import { decodeScAddress, decodeScAmount, formatTokenAmount } from "./stellar";
-import { getJson, setJson, getSacMetadataCacheKey, SAC_METADATA_TTL } from "./cache";
 import { stellarNetwork } from "../config/network";
 import { sorobanStateService } from "../modules/soroban-state/soroban-state.service";
 import { env } from "../config/env";
+import { getJson, setJson, getSacMetadataCacheKey, SAC_METADATA_TTL } from "./cache";
 import { withDeadline } from "./external-request";
 import type { EnrichedSorobanEvent, SorobanRpcEvent } from "../types/soroban-event";
 
 export const SOROBAN_RPC_URL = stellarNetwork.sorobanRpcUrl;
 const LEDGER_BATCH_SIZE = 100;
-const MAX_ACTIVE_CONTRACTS = 100;
+/** Maximum number of distinct contracts the router tracks at once. */
+export const MAX_ACTIVE_CONTRACTS = 100;
 
 export const sorobanServer = new (StellarSdk as any).rpc.Server(
   SOROBAN_RPC_URL,
@@ -48,11 +49,26 @@ export async function loadContractRegistry(): Promise<
   Map<string, ContractRegistry>
 > {
   try {
-    const subscriptions = await prisma.sorobanContractSubscription.findMany({
+    const allSubscriptions = await prisma.sorobanContractSubscription.findMany({
       where: { isActive: true },
       orderBy: { createdAt: "desc" },
-      take: MAX_ACTIVE_CONTRACTS,
     });
+
+    // The cap applies to distinct contracts, not subscription rows: many users
+    // can share one contract. Newest contracts win; every subscription of an
+    // admitted contract is kept so no subscriber is silently dropped.
+    const admitted = new Set<string>();
+    const subscriptions = allSubscriptions.filter((sub) => {
+      if (admitted.has(sub.contractId)) return true;
+      if (admitted.size >= MAX_ACTIVE_CONTRACTS) return false;
+      admitted.add(sub.contractId);
+      return true;
+    });
+    if (admitted.size >= MAX_ACTIVE_CONTRACTS && subscriptions.length < allSubscriptions.length) {
+      console.warn(
+        `[Registry] Contract limit (${MAX_ACTIVE_CONTRACTS}) reached; ${allSubscriptions.length - subscriptions.length} subscription(s) on additional contracts are not being watched`,
+      );
+    }
 
     contractRegistry.clear();
 
@@ -100,6 +116,23 @@ export async function loadContractRegistry(): Promise<
 }
 
 /**
+ * Extracts the event name (first topic, conventionally a symbol such as
+ * "transfer") from an event; "default" when the topic array is empty/missing.
+ */
+export function getEventTopicName(event: Pick<SorobanRpcEvent, "topic">): string {
+  const firstTopic = Array.isArray(event.topic) ? event.topic[0] : undefined;
+  return (
+    (typeof firstTopic === "string"
+      ? firstTopic
+      : typeof firstTopic === "object" &&
+        firstTopic !== null &&
+        "symbol" in firstTopic
+      ? String((firstTopic as { symbol: unknown }).symbol)
+      : null) ?? "default"
+  );
+}
+
+/**
  * Routes an event to matching subscribed users based on contract ID and topic.
  *
  * Accepts a typed `SorobanRpcEvent` instead of `any`, so callers are
@@ -116,18 +149,7 @@ export function routeEventToUsers(
   const contract = contractRegistry.get(contractId);
   if (!contract) return routes;
 
-  // Determine topic from event.  The first element of the raw topic array
-  // is conventionally the event name symbol (e.g. "transfer"); fall back
-  // to "default" for events with an empty or missing topic array.
-  const firstTopic = Array.isArray(event.topic) ? event.topic[0] : undefined;
-  const topic =
-    (typeof firstTopic === 'string'
-      ? firstTopic
-      : typeof firstTopic === 'object' &&
-        firstTopic !== null &&
-        'symbol' in firstTopic
-      ? String((firstTopic as { symbol: unknown }).symbol)
-      : null) ?? 'default';
+  const topic = getEventTopicName(event);
 
   // Check for exact topic match
   let matchedUserIds = contract.topicRoutes.get(topic);
@@ -168,6 +190,389 @@ export function getContractSubscriberCount(contractId: string): number {
   }
 
   return total;
+}
+
+// ---------------------------------------------------------------------------
+// Fee-estimation types
+// ---------------------------------------------------------------------------
+
+/**
+ * Footprint entry describing a single ledger key that will be read or written
+ * by the simulated transaction.
+ */
+export interface LedgerFootprintEntry {
+  /** Hex-encoded ledger key XDR */
+  key: string;
+  /** Durability of the storage entry */
+  durability: 'persistent' | 'temporary';
+}
+
+/**
+ * Rent fee split by storage durability. Persistent entries are archived rather
+ * than deleted and are charged at a higher rate than temporary entries.
+ */
+export interface SorobanRentBreakdown {
+  persistentStroops: string;
+  persistentXlm: string;
+  persistentEntries: number;
+  temporaryStroops: string;
+  temporaryXlm: string;
+  temporaryEntries: number;
+}
+
+/**
+ * Detailed fee breakdown returned by {@link simulateTransaction}.
+ *
+ * All fee values are expressed in *stroops* (1 XLM = 10,000,000 stroops) as
+ * strings so they can be used directly with Stellar SDK big-number helpers.
+ */
+export interface SorobanFeeEstimate {
+  /** Total inclusion fee (base network fee) in stroops */
+  inclusionFeeStroops: string;
+  /** Total resource fee (execution + state rent) in stroops */
+  resourceFeeStroops: string;
+  /** Rent fee for all ledger entries in stroops */
+  rentFeeStroops: string;
+  /** Total of all fees in stroops */
+  totalFeeStroops: string;
+  /** Human-readable total fee in XLM */
+  totalFeeXlm: string;
+  /** Inclusion fee in XLM */
+  inclusionFeeXlm: string;
+  /** Resource fee (execution + state rent) in XLM */
+  resourceFeeXlm: string;
+  /** Rent fee in XLM */
+  rentFeeXlm: string;
+  /** Rent fee split between persistent and temporary storage footprints */
+  rentBreakdown: SorobanRentBreakdown;
+  /** Whether archived entries must be restored before this transaction can run */
+  restoreRequired: boolean;
+  /** Fee of the separate restore transaction in stroops ('0' when not required) */
+  restoreFeeStroops: string;
+  /** Fee of the separate restore transaction in XLM */
+  restoreFeeXlm: string;
+  /** Ledger entries that will be *read* during execution */
+  readFootprint: LedgerFootprintEntry[];
+  /** Ledger entries that will be *written* during execution */
+  writeFootprint: LedgerFootprintEntry[];
+  /** Number of read-only ledger entries */
+  readCount: number;
+  /** Number of read-write ledger entries */
+  writeCount: number;
+  /** Estimated CPU instructions */
+  cpuInstructions: number;
+  /** Estimated memory bytes */
+  memoryBytes: number;
+  /** Whether the simulation succeeded */
+  success: boolean;
+  /** Error description when success is false */
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Stroops per XLM */
+const STROOPS_PER_XLM = 10_000_000;
+
+/**
+ * Converts a stroops string or number to XLM with 7 decimal places.
+ */
+export function stroopsToXlm(stroops: string | number): string {
+  const n = typeof stroops === 'string' ? BigInt(stroops) : BigInt(Math.round(Number(stroops)));
+  const xlmWhole = n / BigInt(STROOPS_PER_XLM);
+  const xlmFrac = n % BigInt(STROOPS_PER_XLM);
+  return `${xlmWhole}.${xlmFrac.toString().padStart(7, '0')}`;
+}
+
+/**
+ * Parses the `sorobanData` XDR field inside a SimulateTransactionResponse and
+ * extracts read/write footprint entries.  Falls back gracefully when the field
+ * is absent (e.g., non-Soroban transactions or unit-test mocks).
+ */
+export function parseLedgerFootprint(simulationResult: any): {
+  readFootprint: LedgerFootprintEntry[];
+  writeFootprint: LedgerFootprintEntry[];
+} {
+  const readFootprint: LedgerFootprintEntry[] = [];
+  const writeFootprint: LedgerFootprintEntry[] = [];
+
+  try {
+    // The stellar-sdk v13 SimulateTransactionResponse exposes a `result` with
+    // `auth` and the raw transaction envelope, but the footprint lives inside
+    // the `transactionData` / `sorobanData` field that the SDK attaches.
+    const sorobanData =
+      simulationResult?.transactionData?.value?.() ??
+      simulationResult?.transactionData ??
+      simulationResult?.result?.sorobanData ??
+      null;
+
+    if (!sorobanData) {
+      return { readFootprint, writeFootprint };
+    }
+
+    // `footprint()` returns an XDR LedgerFootprint with readOnly / readWrite arrays
+    const footprint =
+      typeof sorobanData.footprint === 'function'
+        ? sorobanData.footprint()
+        : sorobanData.footprint ?? null;
+
+    if (!footprint) {
+      return { readFootprint, writeFootprint };
+    }
+
+    const readOnly: any[] =
+      typeof footprint.readOnly === 'function'
+        ? footprint.readOnly()
+        : footprint.readOnly ?? [];
+
+    const readWrite: any[] =
+      typeof footprint.readWrite === 'function'
+        ? footprint.readWrite()
+        : footprint.readWrite ?? [];
+
+    for (const entry of readOnly) {
+      readFootprint.push({
+        key: entry.toXDR?.('hex') ?? String(entry),
+        durability: _detectDurability(entry),
+      });
+    }
+
+    for (const entry of readWrite) {
+      writeFootprint.push({
+        key: entry.toXDR?.('hex') ?? String(entry),
+        durability: _detectDurability(entry),
+      });
+    }
+  } catch {
+    // Footprint parsing is best-effort; never throw.
+  }
+
+  return { readFootprint, writeFootprint };
+}
+
+/**
+ * Detects whether a ledger key belongs to a persistent or temporary storage
+ * entry by inspecting the XDR discriminant.
+ */
+function _detectDurability(ledgerKey: any): 'persistent' | 'temporary' {
+  try {
+    const arm: string =
+      typeof ledgerKey.switch === 'function'
+        ? ledgerKey.switch().name ?? ''
+        : '';
+    if (arm.toLowerCase().includes('temp') || arm.toLowerCase().includes('temporary')) {
+      return 'temporary';
+    }
+    if (
+      typeof ledgerKey.contractData === 'function' ||
+      typeof ledgerKey.contractCode === 'function'
+    ) {
+      const data = ledgerKey.contractData?.();
+      const durabilityArm: string =
+        typeof data?.durability === 'function' ? data.durability().name ?? '' : '';
+      if (durabilityArm.toLowerCase().includes('temp')) {
+        return 'temporary';
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 'persistent';
+}
+
+/**
+ * Relative per-ledger rent weight of each storage class. Mirrors the network
+ * rent-rate denominators (temporary entries are charged half the persistent
+ * rate), so the rent estimate is apportioned accordingly.
+ */
+const PERSISTENT_RENT_WEIGHT = BigInt(2);
+const TEMPORARY_RENT_WEIGHT = BigInt(1);
+
+/**
+ * Apportions the total rent fee over the write footprint by storage durability.
+ * Only written (created / extended) entries accrue rent; with no writes the
+ * rent is attributed to persistent storage. The two parts always sum to
+ * `rentFeeStroops`.
+ */
+export function buildRentBreakdown(
+  rentFeeStroops: bigint,
+  writeFootprint: LedgerFootprintEntry[],
+): SorobanRentBreakdown {
+  const persistentEntries = writeFootprint.filter((e) => e.durability === 'persistent').length;
+  const temporaryEntries = writeFootprint.length - persistentEntries;
+
+  const persistentShare = BigInt(persistentEntries) * PERSISTENT_RENT_WEIGHT;
+  const temporaryShare = BigInt(temporaryEntries) * TEMPORARY_RENT_WEIGHT;
+  const totalShare = persistentShare + temporaryShare;
+
+  const temporary =
+    totalShare === BigInt(0) ? BigInt(0) : (rentFeeStroops * temporaryShare) / totalShare;
+  const persistent = rentFeeStroops - temporary;
+
+  return {
+    persistentStroops: persistent.toString(),
+    persistentXlm: stroopsToXlm(persistent.toString()),
+    persistentEntries,
+    temporaryStroops: temporary.toString(),
+    temporaryXlm: stroopsToXlm(temporary.toString()),
+    temporaryEntries,
+  };
+}
+
+function failedFeeEstimate(error: string): SorobanFeeEstimate {
+  return {
+    inclusionFeeStroops: '0',
+    resourceFeeStroops: '0',
+    rentFeeStroops: '0',
+    totalFeeStroops: '0',
+    totalFeeXlm: '0.0000000',
+    inclusionFeeXlm: '0.0000000',
+    resourceFeeXlm: '0.0000000',
+    rentFeeXlm: '0.0000000',
+    rentBreakdown: buildRentBreakdown(BigInt(0), []),
+    restoreRequired: false,
+    restoreFeeStroops: '0',
+    restoreFeeXlm: '0.0000000',
+    readFootprint: [],
+    writeFootprint: [],
+    readCount: 0,
+    writeCount: 0,
+    cpuInstructions: 0,
+    memoryBytes: 0,
+    success: false,
+    error,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// simulateTransaction
+// ---------------------------------------------------------------------------
+
+/**
+ * Wraps the Soroban RPC `simulateTransaction` call and returns a structured
+ * {@link SorobanFeeEstimate} with read/write ledger entry footprints and a
+ * complete fee breakdown including storage rent.
+ *
+ * @param xdrEnvelope - Base64-encoded XDR TransactionEnvelope of the Soroban
+ *                      transaction to simulate.
+ */
+export async function simulateTransaction(xdrEnvelope: string): Promise<SorobanFeeEstimate> {
+  try {
+    // Decode the envelope and let the SDK build a Transaction object so the
+    // RPC call receives a proper Transaction instance.
+    const transaction = StellarSdk.TransactionBuilder.fromXDR(
+      xdrEnvelope,
+      (StellarSdk as any).Networks?.TESTNET ?? 'Test SDF Network ; September 2015'
+    );
+
+    const simulationResult: any = await sorobanServer.simulateTransaction(transaction);
+
+    // -----------------------------------------------------------------------
+    // Error path
+    // -----------------------------------------------------------------------
+    if (simulationResult?.error) {
+      return failedFeeEstimate(String(simulationResult.error));
+    }
+
+    // -----------------------------------------------------------------------
+    // Extract fees
+    // The SDK returns minResourceFee as a string (stroops) and the classic
+    // base fee is embedded in the transaction itself.  We also surface the
+    // rent fee component separately when available.
+    // -----------------------------------------------------------------------
+    const minResourceFee: string = String(simulationResult?.minResourceFee ?? '0');
+
+    // Inclusion (base) fee: use 100 stroops as the minimum network default
+    // when we cannot read it from the transaction directly.
+    let inclusionFeeStroops = '100';
+    try {
+      const fee = transaction.fee;
+      if (fee && Number(fee) > 0) {
+        inclusionFeeStroops = String(fee);
+      }
+    } catch {
+      // keep default
+    }
+
+    // Rent fee is part of the resource fee; the SDK >= v13 may expose it via
+    // `transactionData.resourceFee()` decomposition.  We attempt to extract it
+    // and fall back to a proportional estimate.
+    let rentFeeStroops = '0';
+    try {
+      const td =
+        simulationResult?.transactionData?.value?.() ??
+        simulationResult?.transactionData ??
+        null;
+      const rf: bigint =
+        typeof td?.resourceFee === 'function'
+          ? BigInt(td.resourceFee().toString())
+          : BigInt(0);
+      if (rf > BigInt(0)) {
+        rentFeeStroops = rf.toString();
+      } else if (BigInt(minResourceFee) > BigInt(0)) {
+        // Estimate: rent ≈ 30 % of total resource fee
+        rentFeeStroops = ((BigInt(minResourceFee) * BigInt(30)) / BigInt(100)).toString();
+      }
+    } catch {
+      if (BigInt(minResourceFee) > BigInt(0)) {
+        rentFeeStroops = ((BigInt(minResourceFee) * BigInt(30)) / BigInt(100)).toString();
+      }
+    }
+
+    const totalFeeStroops = (
+      BigInt(inclusionFeeStroops) + BigInt(minResourceFee)
+    ).toString();
+
+    // -----------------------------------------------------------------------
+    // Extract CPU / memory resource usage
+    // -----------------------------------------------------------------------
+    let cpuInstructions = 0;
+    let memoryBytes = 0;
+    try {
+      const resources = simulationResult?.result?.auth?.[0]?.resources?.() ?? null;
+      if (resources) {
+        cpuInstructions = Number(resources.instructions?.() ?? 0);
+        memoryBytes = Number(resources.readBytes?.() ?? 0);
+      }
+    } catch {
+      // best-effort
+    }
+
+    // -----------------------------------------------------------------------
+    // Footprint
+    // -----------------------------------------------------------------------
+    const { readFootprint, writeFootprint } = parseLedgerFootprint(simulationResult);
+    const rentBreakdown = buildRentBreakdown(BigInt(rentFeeStroops), writeFootprint);
+
+    // Archived entries need a separate RestoreFootprint transaction first.
+    const restoreFeeStroops = String(simulationResult?.restorePreamble?.minResourceFee ?? '0');
+
+    return {
+      inclusionFeeStroops,
+      resourceFeeStroops: minResourceFee,
+      rentFeeStroops,
+      totalFeeStroops,
+      totalFeeXlm: stroopsToXlm(totalFeeStroops),
+      inclusionFeeXlm: stroopsToXlm(inclusionFeeStroops),
+      resourceFeeXlm: stroopsToXlm(minResourceFee),
+      rentFeeXlm: stroopsToXlm(rentFeeStroops),
+      rentBreakdown,
+      restoreRequired: BigInt(restoreFeeStroops) > BigInt(0),
+      restoreFeeStroops,
+      restoreFeeXlm: stroopsToXlm(restoreFeeStroops),
+      readFootprint,
+      writeFootprint,
+      readCount: readFootprint.length,
+      writeCount: writeFootprint.length,
+      cpuInstructions,
+      memoryBytes,
+      success: true,
+    };
+  } catch (error: any) {
+    return failedFeeEstimate(error?.message ?? String(error));
+  }
 }
 
 /**
@@ -305,6 +710,185 @@ export async function fetchContractEvents(
   }
 }
 
+/** Soroban RPC allows 5 filters per request, each with up to 5 contract IDs. */
+const EVENT_FILTERS_PER_REQUEST = 5;
+const CONTRACT_IDS_PER_FILTER = 5;
+export const CONTRACTS_PER_EVENT_REQUEST = EVENT_FILTERS_PER_REQUEST * CONTRACT_IDS_PER_FILTER;
+
+/**
+ * Fetches events for many contracts at once, packing up to
+ * {@link CONTRACTS_PER_EVENT_REQUEST} contract IDs into each `getEvents`
+ * request, so 100 subscribed contracts cost 4 RPC calls instead of 100.
+ * A failing batch is logged and skipped without losing the others.
+ */
+export async function fetchEventsForContracts(
+  contractIds: string[],
+  startLedger: number,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<any[]> {
+  const unique = Array.from(new Set(contractIds.filter(Boolean)));
+  const timeoutMs = options.timeoutMs ?? env.SOROBAN_RPC_TIMEOUT_MS;
+  const events: any[] = [];
+
+  for (let i = 0; i < unique.length; i += CONTRACTS_PER_EVENT_REQUEST) {
+    const batch = unique.slice(i, i + CONTRACTS_PER_EVENT_REQUEST);
+    const filters = [];
+    for (let j = 0; j < batch.length; j += CONTRACT_IDS_PER_FILTER) {
+      filters.push({ type: "contract", contractIds: batch.slice(j, j + CONTRACT_IDS_PER_FILTER) });
+    }
+
+    try {
+      const response: any = await withDeadline(
+        () => sorobanServer.getEvents({ startLedger, filters }),
+        timeoutMs,
+        options.signal,
+        "Soroban RPC getEvents (multi-contract)",
+      );
+      events.push(...(response.events || []));
+    } catch (error: any) {
+      console.error(
+        `[SorobanRPC] Error fetching events for ${batch.length} contract(s):`,
+        error.message,
+      );
+    }
+  }
+
+  return events;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #43 – State Snapshot & Historical Event Backfill
+// ---------------------------------------------------------------------------
+
+export interface SorobanStateSnapshot {
+  contractId: string;
+  ledgerSequence: number;
+  capturedAt: string; // ISO timestamp
+  keyCount: number;
+  entries: Array<{ key: string; value: string; durability: 'persistent' | 'temporary' }>;
+}
+
+/**
+ * Captures a state snapshot of a Soroban contract by fetching all
+ * ledger entries for the given contract ID at the current ledger.
+ * Falls back gracefully if the RPC call fails.
+ */
+export async function captureContractSnapshot(
+  contractId: string
+): Promise<SorobanStateSnapshot> {
+  const capturedAt = new Date().toISOString();
+  const entries: SorobanStateSnapshot['entries'] = [];
+
+  let ledgerSequence = 0;
+
+  try {
+    ledgerSequence = await getSorobanLatestLedger();
+
+    // Build a ContractData ledger key for the contract's instance entry.
+    // The stellar-sdk exposes xdr.LedgerKey.contractData(…) for this purpose.
+    const xdr = (StellarSdk as any).xdr;
+
+    const contractAddress = new (StellarSdk as any).Address(contractId);
+    const instanceKey = xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: contractAddress.toScAddress(),
+        key: xdr.ScVal.scvLedgerKeyContractInstance(),
+        durability: xdr.ContractDataDurability.persistent(),
+      })
+    );
+
+    const response = await sorobanServer.getLedgerEntries(instanceKey);
+    const rawEntries: any[] = response?.entries ?? [];
+
+    for (const entry of rawEntries) {
+      try {
+        const keyXdr: string = entry.key?.toXDR?.('base64') ?? String(entry.key ?? '');
+        const valXdr: string = entry.val?.toXDR?.('base64') ?? String(entry.val ?? '');
+        const durability = _detectDurability(entry.key);
+        entries.push({ key: keyXdr, value: valXdr, durability });
+      } catch {
+        // best-effort – skip unparseable entries
+      }
+    }
+  } catch (error: any) {
+    console.warn(
+      `[SorobanRPC] captureContractSnapshot failed for ${contractId}: ${error?.message ?? error}`
+    );
+  }
+
+  return {
+    contractId,
+    ledgerSequence,
+    capturedAt,
+    keyCount: entries.length,
+    entries,
+  };
+}
+
+export interface BackfillResult {
+  contractId: string;
+  startLedger: number;
+  endLedger: number;
+  eventsProcessed: number;
+  errors: number;
+}
+
+/** Page size (ledgers) used when backfilling historical events. */
+const BACKFILL_PAGE_SIZE = 100;
+
+/**
+ * Backfills historical Soroban contract events between startLedger and endLedger.
+ * Processes events in pages of 100 ledgers and calls `onEvent` for each event.
+ */
+export async function backfillContractEvents(
+  contractId: string,
+  startLedger: number,
+  endLedger: number,
+  onEvent: (event: any) => Promise<void>
+): Promise<BackfillResult> {
+  let eventsProcessed = 0;
+  let errors = 0;
+
+  for (
+    let pageStart = startLedger;
+    pageStart <= endLedger;
+    pageStart += BACKFILL_PAGE_SIZE
+  ) {
+    try {
+      const events = await fetchContractEvents(contractId, pageStart);
+
+      for (const event of events) {
+        try {
+          await onEvent(event);
+          eventsProcessed++;
+        } catch (handlerError: any) {
+          console.error(
+            `[SorobanRPC] backfillContractEvents handler error for ${contractId} at ledger ${pageStart}:`,
+            handlerError?.message ?? handlerError
+          );
+          errors++;
+        }
+      }
+    } catch (fetchError: any) {
+      console.error(
+        `[SorobanRPC] backfillContractEvents fetch error for ${contractId} at ledger ${pageStart}:`,
+        fetchError?.message ?? fetchError
+      );
+      errors++;
+    }
+  }
+
+  return {
+    contractId,
+    startLedger,
+    endLedger,
+    eventsProcessed,
+    errors,
+  };
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * Fetches contract events within a ledger range with pagination.
  *
@@ -316,11 +900,13 @@ export async function* fetchContractEventsInRange(
   contractId: string,
   startLedger: number,
   endLedger: number,
+  batchSize: number = LEDGER_BATCH_SIZE,
 ): AsyncGenerator<EnrichedSorobanEvent[]> {
   let currentStart = startLedger;
+  const effectiveBatchSize = Math.max(1, batchSize);
 
   while (currentStart <= endLedger) {
-    const batchEnd = Math.min(currentStart + LEDGER_BATCH_SIZE, endLedger);
+    const batchEnd = Math.min(currentStart + effectiveBatchSize - 1, endLedger);
 
     try {
       console.log(
@@ -344,7 +930,10 @@ export async function* fetchContractEventsInRange(
         'Soroban RPC getEvents',
       );
 
-      const events: SorobanRpcEvent[] = response.events || [];
+      const events: SorobanRpcEvent[] = (response?.events || []).filter((evt: SorobanRpcEvent) => {
+        const seq = evt.ledger ?? currentStart;
+        return seq >= currentStart && seq <= batchEnd;
+      });
 
       if (events.length > 0) {
         const enrichedEvents: EnrichedSorobanEvent[] = events.map((evt) => ({
@@ -356,13 +945,7 @@ export async function* fetchContractEventsInRange(
         yield enrichedEvents;
       }
 
-      if (events.length > 0 && events[events.length - 1]?.ledger) {
-        currentStart = (events[events.length - 1].ledger as number) + 1;
-      } else {
-        currentStart = batchEnd + 1;
-      }
-
-      if (events.length === 0) break;
+      currentStart = batchEnd + 1;
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(
@@ -1414,6 +1997,9 @@ export function decodeSorobanErrorFromXdr(xdrBase64: string): SorobanErrorInfo |
   }
 }
 
+// ---------------------------------------------------------------------------
+// SAC metadata auto-discovery
+// ---------------------------------------------------------------------------
 
 export interface SacMetadata {
   contractId: string;
@@ -1466,19 +2052,33 @@ export async function simulateContractCall(
   }
 }
 
-/**
- * Queries SAC token metadata (decimals, symbol, name) from Soroban RPC.
- */
-export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMetadata> {
-  const fallback: SacMetadata = {
+/** How long a fallback (undiscovered) SAC result is cached, so a flaky RPC is retried soon. */
+const SAC_FALLBACK_TTL = 60;
+
+interface SacDiscoveryResult {
+  metadata: SacMetadata;
+  /** True only when `decimals()` was actually read from the contract. */
+  discovered: boolean;
+}
+
+function defaultSacMetadata(contractId: string): SacMetadata {
+  return {
     contractId,
     name: 'Unknown Token',
     symbol: contractId ? contractId.substring(0, 8) : 'Unknown',
     decimals: 7,
   };
+}
+
+/**
+ * Queries `decimals()`, `symbol()` and `name()` on the SAC contract and reports
+ * whether the decimals were genuinely discovered (as opposed to defaulted).
+ */
+async function discoverSacMetadata(contractId: string): Promise<SacDiscoveryResult> {
+  const fallback = defaultSacMetadata(contractId);
 
   if (!contractId) {
-    return fallback;
+    return { metadata: fallback, discovered: false };
   }
 
   try {
@@ -1489,12 +2089,16 @@ export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMe
     ]);
 
     let decimals = fallback.decimals;
+    let discovered = false;
     if (typeof decimalsVal === 'number' && Number.isInteger(decimalsVal) && decimalsVal >= 0) {
       decimals = decimalsVal;
+      discovered = true;
     } else if (typeof decimalsVal === 'bigint') {
       decimals = Number(decimalsVal);
+      discovered = true;
     } else if (typeof decimalsVal === 'string' && /^\d+$/.test(decimalsVal)) {
       decimals = parseInt(decimalsVal, 10);
+      discovered = true;
     }
 
     const symbol =
@@ -1509,20 +2113,29 @@ export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMe
         ? symbol
         : fallback.name;
 
-    return {
-      contractId,
-      name,
-      symbol,
-      decimals,
-    };
+    return { metadata: { contractId, name, symbol, decimals }, discovered };
   } catch (error: any) {
     console.warn(`[SorobanRPC] Error fetching SAC metadata for contract ${contractId}:`, error.message);
-    return fallback;
+    return { metadata: fallback, discovered: false };
   }
 }
 
 /**
+ * Queries SAC token metadata (decimals, symbol, name) from Soroban RPC.
+ */
+export async function fetchSacMetadataFromRpc(contractId: string): Promise<SacMetadata> {
+  return (await discoverSacMetadata(contractId)).metadata;
+}
+
+/** In-flight discoveries, so concurrent first sightings share one RPC round-trip. */
+const inflightSacDiscoveries = new Map<string, Promise<SacMetadata>>();
+
+/**
  * Retrieves SAC metadata from Redis cache (24h TTL) or discovers it from Soroban RPC.
+ *
+ * Successful discoveries are cached for 24h. A failed discovery returns the
+ * 7-decimal default but is only cached briefly, so a transient RPC error can
+ * never pin wrong decimals for a day.
  */
 export async function getSacMetadata(
   contractId: string,
@@ -1546,9 +2159,33 @@ export async function getSacMetadata(
     }
   }
 
-  const metadata = await fetchSacMetadataFromRpc(contractId);
-  await setJson(cacheKey, metadata, SAC_METADATA_TTL);
-  return metadata;
+  const inflight = inflightSacDiscoveries.get(contractId);
+  if (inflight) {
+    return inflight;
+  }
+
+  const discovery = (async () => {
+    const { metadata, discovered } = await discoverSacMetadata(contractId);
+    await setJson(cacheKey, metadata, discovered ? SAC_METADATA_TTL : SAC_FALLBACK_TTL);
+    return metadata;
+  })().finally(() => {
+    inflightSacDiscoveries.delete(contractId);
+  });
+
+  inflightSacDiscoveries.set(contractId, discovery);
+  return discovery;
+}
+
+/**
+ * Re-formats a parsed event's raw amount using the contract's real decimals.
+ * Events without a raw amount are returned untouched.
+ */
+export async function withSacDecimals<T extends { contractId: string; amount: string; rawAmount?: bigint }>(
+  parsed: T
+): Promise<T> {
+  if (parsed.rawAmount === undefined || !parsed.contractId) return parsed;
+  const { formattedAmount } = await formatSacAmountWithDiscovery(parsed.rawAmount, parsed.contractId);
+  return { ...parsed, amount: formattedAmount };
 }
 
 /**

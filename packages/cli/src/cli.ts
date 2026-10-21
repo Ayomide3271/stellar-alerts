@@ -2,9 +2,12 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
+import { render } from 'ink';
 import { registerWalletCommands } from './commands/wallet.js';
 import { registerStreamCommands } from './commands/stream.js';
 import { registerProfileCommands } from './commands/profile.js';
+import { registerCompletionCommands } from './commands/completion.js';
+import StreamTui from './tui/stream-tui.js';
 
 const program = new Command();
 
@@ -22,6 +25,7 @@ program
 registerWalletCommands(program);
 registerStreamCommands(program);
 registerProfileCommands(program);
+registerCompletionCommands(program);
 
 // Health check command
 program
@@ -41,6 +45,14 @@ program
       console.log(chalk.red(`❌ API is not reachable: ${(error as Error).message}`));
       process.exit(1);
     }
+  });
+
+// TUI Dashboard command
+program
+  .command('tui')
+  .description('Launch interactive Terminal UI (TUI) dashboard')
+  .action(() => {
+    render(<StreamTui />);
   });
 
 // Error handling

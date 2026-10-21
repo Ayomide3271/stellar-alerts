@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { PaymentDTO, filterPayments, extractAvailableAssets } from '@stellar-alerts/shared';
+import { CopyButton } from '@/components/ui/CopyButton';
 
 interface PaymentTableProps {
   payments: PaymentDTO[];
@@ -86,7 +87,7 @@ export const PaymentTable: React.FC<PaymentTableProps> = ({ payments = [], isLoa
   };
 
   return (
-    <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800 backdrop-blur-xl shadow-xl space-y-6">
+    <div className="min-w-0 p-4 sm:p-6 rounded-2xl bg-slate-900/60 border border-slate-800 backdrop-blur-xl shadow-xl space-y-6">
       {/* Header & Title */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -220,7 +221,7 @@ export const PaymentTable: React.FC<PaymentTableProps> = ({ payments = [], isLoa
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm border-collapse">
+          <table className="w-full min-w-[760px] text-left text-sm border-collapse">
             <thead>
               <tr className="border-b border-slate-800 text-xs font-semibold uppercase tracking-wider text-slate-400">
                 <th className="py-3.5 px-4">Timestamp</th>
@@ -247,25 +248,39 @@ export const PaymentTable: React.FC<PaymentTableProps> = ({ payments = [], isLoa
                   </td>
                   <td className="py-3.5 px-4 font-mono text-xs text-slate-400 whitespace-nowrap">
                     {payment.fromAddress ? (
-                      <span title={payment.fromAddress}>
-                        {payment.fromAddress.length > 16
-                          ? `${payment.fromAddress.substring(0, 8)}...${payment.fromAddress.substring(payment.fromAddress.length - 8)}`
-                          : payment.fromAddress}
+                      <span className="flex items-center gap-1.5" title={payment.fromAddress}>
+                        <span>
+                          {payment.fromAddress.length > 16
+                            ? `${payment.fromAddress.substring(0, 8)}...${payment.fromAddress.substring(payment.fromAddress.length - 8)}`
+                            : payment.fromAddress}
+                        </span>
+                        <CopyButton
+                          text={payment.fromAddress}
+                          label="Copy sender address"
+                        />
                       </span>
                     ) : (
                       'System / Genesis'
                     )}
                   </td>
                   <td className="py-3.5 px-4 font-mono text-xs text-slate-400 whitespace-nowrap">
-                    <a
-                      href={`https://stellar.expert/explorer/testnet/tx/${payment.txHash}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors flex items-center gap-1"
-                    >
-                      <span>{payment.txHash ? `${payment.txHash.substring(0, 8)}...` : 'View Tx'}</span>
-                      <span className="text-[10px]">↗</span>
-                    </a>
+                    <span className="flex items-center gap-1.5">
+                      <a
+                        href={`https://stellar.expert/explorer/testnet/tx/${payment.txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors flex items-center gap-1"
+                      >
+                        <span>{payment.txHash ? `${payment.txHash.substring(0, 8)}...` : 'View Tx'}</span>
+                        <span className="text-[10px]">↗</span>
+                      </a>
+                      {payment.txHash && (
+                        <CopyButton
+                          text={payment.txHash}
+                          label="Copy transaction hash"
+                        />
+                      )}
+                    </span>
                   </td>
                   <td className="py-3.5 px-4 whitespace-nowrap">
                     <a

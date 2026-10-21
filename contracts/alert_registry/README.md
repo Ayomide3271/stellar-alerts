@@ -32,6 +32,20 @@ Removes a wallet's alert subscription for the given channel. Requires authentica
 ### 7. `get_subscription(user: Address, wallet: Address, channel: Symbol) -> Option<AlertSubscription>`
 Queries a wallet's alert subscription for a given channel.
 
+### 8. Admin governance & access control
+All governance calls authenticate the caller and **panic with `Error::Unauthorized`** when the caller lacks permission.
+
+- `initialize(admin)` — one-time setup of the admin address.
+- `get_admin() -> Option<Address>` / `set_admin(admin, new_admin)` — admin only.
+- `update_config(caller, key, value)` — admin or `Role::ConfigManager` holder, and only while the multisig threshold is 1. Publishes a `CFG` event.
+- `grant_role(admin, account, role)` / `revoke_role(admin, account, role)` / `has_role(account, role)` — role-based access control (`Role::ConfigManager`). Grant/revoke are admin only.
+- `set_signers(admin, signers, threshold)` — enables multisig governance (`1 <= threshold <= signers.len()`, else `Error::InvalidThreshold`). With a threshold above 1, direct `update_config` is disabled.
+- `propose_config(proposer, key, value) -> u32` — a signer opens a proposal and counts as the first approval.
+- `approve_proposal(signer, id)` — another signer approves; the change executes when approvals reach the threshold. Fails with `AlreadyApproved`, `ProposalNotFound` or `ProposalAlreadyExecuted`.
+- `get_signers()`, `get_threshold()`, `get_proposal(id)` — read-only views.
+
+Error codes: `Unauthorized=1`, `AlreadyInitialized=2`, `NotInitialized=3`, `WalletNotRegistered=4`, `SubscriptionNotFound=5`, `InvalidThreshold=6`, `ProposalNotFound=7`, `AlreadyApproved=8`, `ProposalAlreadyExecuted=9`.
+
 ---
 
 ## 🛠️ How to Compile & Deploy Locally

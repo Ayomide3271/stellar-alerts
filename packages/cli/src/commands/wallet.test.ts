@@ -2,8 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Command } from 'commander';
 import { registerWalletCommands } from './wallet.js';
 
-// Mock the API client
+// Mock the API client and auth
+const mockGetWallets = vi.fn();
+const mockAddWallet = vi.fn();
+const mockDeleteWallet = vi.fn();
+
 vi.mock('../lib/api.js', () => ({
+  ApiClient: vi.fn().mockImplementation(() => ({
+    getWallets: mockGetWallets,
+    addWallet: mockAddWallet,
+    deleteWallet: mockDeleteWallet,
+  })),
   apiClient: {
     addWallet: vi.fn(),
     getWallets: vi.fn(),
@@ -11,6 +20,10 @@ vi.mock('../lib/api.js', () => ({
     getPayments: vi.fn(),
     streamPayments: vi.fn(),
   },
+}));
+
+vi.mock('../lib/auth.js', () => ({
+  resolveAuth: vi.fn(() => ({ apiUrl: 'http://localhost:3000', token: 'mock-token' })),
 }));
 
 describe('Wallet Commands', () => {
@@ -76,5 +89,58 @@ describe('Wallet Commands', () => {
     const options = addCmd!.options;
     const tokenOption = options.find((o: any) => o.short === '-t');
     expect(tokenOption).toBeDefined();
+  });
+
+  it('should have json option for list command', () => {
+    const walletCmd = program.commands.find(cmd => cmd.name() === 'wallet');
+    const listCmd = walletCmd!.commands.find(cmd => cmd.name() === 'list');
+
+    const options = listCmd!.options;
+    const jsonOption = options.find((o: any) => o.long === '--json');
+    expect(jsonOption).toBeDefined();
+  });
+
+  it('wallet list: outputs valid JSON when --json flag is passed', async () => {
+    const mockWallets = [
+      {
+        id: 'wallet-123',
+        publicKey: 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H',
+        label: 'Treasury',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    mockGetWallets.mockResolvedValueOnce(mockWallets);
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await program.parseAsync(['wallet', 'list', '--json'], { from: 'user' });
+
+    expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(mockWallets, null, 2));
+    const parsed = JSON.parse(consoleSpy.mock.calls[0][0]);
+    expect(parsed).toEqual(mockWallets);
+
+    consoleSpy.mockRestore();
+  });
+
+  it('wallet list: outputs table formatting when --json is omitted', async () => {
+    const mockWallets = [
+      {
+        id: 'wallet-123',
+        publicKey: 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H',
+        label: 'Treasury',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    mockGetWallets.mockResolvedValueOnce(mockWallets);
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await program.parseAsync(['wallet', 'list'], { from: 'user' });
+
+    const allLogs = consoleSpy.mock.calls.flat().join(' ');
+    expect(allLogs).toContain('Watched Wallets');
+    expect(allLogs).toContain('GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H');
+
+    consoleSpy.mockRestore();
   });
 });

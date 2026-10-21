@@ -56,7 +56,62 @@ NEXT_IGNORE_INCORRECT_LOCKFILE=1
 
 The frontend will be available at `http://localhost:3000` and the API at `http://localhost:3001`.
 
-## 4. Freelancer Alert Quick Start
+## 4. Postman Collection
+
+The repository ships a Postman collection covering every Fastify route mounted by `apps/api/src/app.ts` (including its plugins):
+
+- `stellar_alerts.postman_collection.json` (repository root)
+- `apps/api/stellar_alerts.postman_collection.json` (identical copy for the API workspace)
+
+### Import and configure
+
+1. Start the API on `http://localhost:3001`.
+2. In Postman, choose **Import** and select either collection file.
+3. Open the collection variables, set `baseUrl` if your API runs elsewhere, and leave `{{jwtToken}}` empty until you sign in.
+
+### Get a token
+
+Every protected request sends `Authorization: Bearer {{jwtToken}}`.
+
+- **Magic link:** run **Authentication → Magic Link → Request Magic Link**. In development the response includes a `token`; the request's test script saves it as `{{magicToken}}`. Then run **Verify Magic Link**, which saves the session token to `{{jwtToken}}` and the rotating token to `{{refreshToken}}`.
+- **SEP-10:** run **Authentication → SEP-10 → Get SEP-10 Challenge**, sign the returned envelope with Freighter (or any Stellar SDK), paste the signed XDR into **Verify SEP-10 Challenge**, and the test script saves the session tokens.
+
+`POST /auth/refresh` rotates the refresh token and updates both collection variables. If you sign in outside Postman, paste the access token directly into `{{jwtToken}}`.
+
+### Variables and request order
+
+- IDs are captured automatically: **Add Wallet** saves `{{walletId}}`, **Create Webhook** saves `{{webhookId}}`, **Create Alert Rule** saves `{{alertRuleId}}`, **Create Export Job** saves `{{exportId}}`, **Analyze Transaction** saves `{{simulationId}}`, and **Generate Telegram Sync Code** saves `{{telegramSyncCode}}`.
+- **List** requests also store the first returned id, so a folder can be explored without copy/paste.
+- **Get Export Job** splits the signed `download.url` into `{{exportExpires}}` and `{{exportSig}}` for **Download Export File**.
+- Wallet cursor status is **Wallets & Ingestion → Get Wallet Ingestion Status** (`GET /wallets/:id/ingestion-status`). Paginated list requests document their `limit`/`cursor` query parameters; set `{{cursor}}` from a response's `pagination.nextCursor`.
+- Mutating wallet and webhook requests send an `Idempotency-Key` header of `{{$guid}}` because those routes support replay protection.
+
+### Callbacks that need real provider credentials
+
+These requests intentionally use empty placeholders because the provider generates the signature:
+
+- **Telegram Mini App:** set `{{telegramInitData}}` for the `X-Telegram-Init-Data` header (the value must contain `hash=`).
+- **Slack:** `{{slackSignature}}`, `{{slackTimestamp}}`, and `{{slackVerificationToken}}` must match the signed slash-command payload and Slack's 5-minute replay window.
+- **Discord:** `{{discordSignature}}` and `{{discordTimestamp}}` must sign the exact raw interaction body. A bare `type: 1` PING with fake headers returns 401 by design.
+- **SSE:** `GET /events` holds the connection open, so Postman shows it as pending; this is expected.
+
+### Validate with Postman CLI (Newman)
+
+```bash
+# Parse and run a public folder against a running API
+npx newman run stellar_alerts.postman_collection.json \
+  --folder "Health & Realtime" \
+  --env-var baseUrl=http://localhost:3001
+
+# Full collection (requires a signed-in jwtToken and a running API + Postgres + Redis)
+npx newman run stellar_alerts.postman_collection.json \
+  --env-var baseUrl=http://localhost:3001 \
+  --env-var jwtToken="<paste-access-token>"
+```
+
+The collection JSON is also validated in CI-friendly form with `node -e "JSON.parse(require('fs').readFileSync('stellar_alerts.postman_collection.json','utf8'))"`.
+
+## 5. Freelancer Alert Quick Start
 
 Follow this flow to connect your wallet, link Telegram, and verify the alerts pipeline.
 
@@ -80,7 +135,7 @@ Follow this flow to connect your wallet, link Telegram, and verify the alerts pi
 3. The ingestion worker will detect the payment and enqueue a job.
 4. You should receive a Telegram notification shortly after!
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 - **Database Errors / "Relation does not exist":** Ensure your Docker container is running and that you've pushed the schema using `npm run db:push`.
 - **Wallet Connection Fails:** Ensure the Freighter extension is unlocked and configured to the correct network (Testnet/Mainnet). Check your browser console for `did:pkh:stellar` challenge errors.

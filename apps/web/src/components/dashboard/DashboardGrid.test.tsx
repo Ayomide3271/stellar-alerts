@@ -77,6 +77,41 @@ describe('DashboardGrid', () => {
     unmount();
   });
 
+  it('renders widgets added after mount instead of dropping them', () => {
+    // The dashboard only adds its wallets widget once the portfolio loads, so
+    // the stored order captured on mount legitimately knows fewer ids.
+    const { rerender } = render(<DashboardGrid items={items.slice(0, 2)} />);
+    expect(screen.queryByTestId('dashboard-widget-payments')).not.toBeInTheDocument();
+
+    rerender(<DashboardGrid items={items} />);
+
+    expect(screen.getByTestId('dashboard-widget-payments')).toBeInTheDocument();
+    const labels = screen
+      .getAllByTestId(/dashboard-widget-handle-/)
+      .map((el) => el.textContent ?? '');
+    expect(labels[2]).toContain('Payments');
+  });
+
+  it('reorders widgets added after mount using their visible positions', () => {
+    const { rerender } = render(<DashboardGrid items={items.slice(0, 2)} />);
+
+    rerender(<DashboardGrid items={items} />);
+
+    const payments = screen.getByTestId('dashboard-widget-payments');
+    const summary = screen.getByTestId('dashboard-widget-summary');
+    const dt = makeDataTransfer();
+
+    fireEvent.dragStart(payments, { dataTransfer: dt });
+    fireEvent.drop(summary, { dataTransfer: dt });
+
+    const labels = screen
+      .getAllByTestId(/dashboard-widget-handle-/)
+      .map((el) => el.textContent ?? '');
+    expect(labels[0]).toContain('Payments');
+    expect(labels[1]).toContain('Summary Overview');
+    expect(labels[2]).toContain('Wallets');
+  });
+
   it('restores a previously saved order on mount', () => {
     const storageKey = 'test-dashboard-order';
     window.localStorage.setItem(storageKey, JSON.stringify(['payments', 'summary', 'wallets']));

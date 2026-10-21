@@ -46,6 +46,7 @@ model Wallet {
   alertRules AlertRule[]
 
   @@index([userId, createdAt])
+  @@index([deletedAt])
 }
 
 model IngestionCursor {
@@ -91,6 +92,7 @@ model OutboxEvent {
   id          String    @id @default(cuid())
   eventType   String
   aggregateId String
+  idempotencyKey String? @unique
   payload     Json
   status      String    @default("pending")
   attempts    Int       @default(0)
@@ -136,6 +138,7 @@ model DeliveryLog {
   status    String
   error     String?
   attempt   Int      @default(1)
+  durationMs Float?
   createdAt DateTime @default(now())
 
   @@unique([paymentId, channel])
@@ -275,6 +278,7 @@ model WebhookLog {
   webhook      Webhook  @relation(fields: [webhookId], references: [id], onDelete: Cascade)
   statusCode   Int?
   responseBody String?
+  durationMs   Float?
   error        String?
   sentAt       DateTime @default(now())
   createdAt    DateTime @default(now())

@@ -34,6 +34,7 @@
     "generate:types:check": "tsx scripts/generate-types.ts --check",
     "check:env-examples": "node tools/check-env-examples.mjs",
     "check:secrets": "node tools/check-secrets.mjs",
+    "check:secrets:staged": "node scripts/scan-staged-secrets.mjs",
     "test:contributor-checks": "node --test tools/check-env-examples.test.mjs tools/check-secrets.test.mjs",
     "openapi:check:breaking": "tsx scripts/check-openapi-breaking-changes.ts",
     "benchmark:stream": "tsx scripts/benchmark-stream.ts",

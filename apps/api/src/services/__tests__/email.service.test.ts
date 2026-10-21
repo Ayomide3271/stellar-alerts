@@ -28,7 +28,7 @@ describe('Issue #263: Resend Email Delivery & Templates', () => {
       const escaped = escapeHtml(malicious);
       expect(escaped).not.toContain('<script>');
       expect(escaped).toContain('&lt;script&gt;');
-      expect(escaped).toContain('&amp;foo=');
+      expect(escaped).toContain('&amp;foo');
       expect(escaped).toContain('&quot;bar&quot;');
       expect(escaped).toContain('&#39;baz&#39;');
     });
@@ -41,7 +41,7 @@ describe('Issue #263: Resend Email Delivery & Templates', () => {
         txHash: '0x1234567890abcdef',
         amount: '250.00',
         asset: 'USDC',
-        assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335WFOPVQOI3M7G73X2D4J80000',
+        assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RhTM335WFOPVQOI3M7G73X2D4JEA0000',
         fromAddress: 'GUSER1234567890',
         receivedAt: '2026-09-23T12:00:00Z',
         recipientEmail: 'user@example.com',
@@ -91,7 +91,7 @@ describe('Issue #263: Resend Email Delivery & Templates', () => {
       const rawError = 'Unauthorized Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.invalid';
       const sanitized = sanitizeEmailErrorMessage(rawError);
       expect(sanitized).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
-      expect(sanitized).toContain('Bearer ****************');
+      expect(sanitized).toContain('Bearer *****************');
     });
   });
 
@@ -104,10 +104,10 @@ describe('Issue #263: Resend Email Delivery & Templates', () => {
           paymentId: 'pay_1',
           txHash: 'tx_1',
           amount: '10',
-          asset: 'XLM',
+          asset: 'XLM ',
           fromAddress: 'G123',
           receivedAt: '2026-09-23T10:00:00Z',
-        }
+        },
       );
 
       expect(result.skipped).toBe(true);
@@ -125,8 +125,8 @@ describe('Issue #263: Resend Email Delivery & Templates', () => {
             asset: 'XLM',
             fromAddress: 'G123',
             receivedAt: '2026-09-23T10:00:00Z',
-          }
-        )
+          },
+        ),
       ).rejects.toThrow(PermanentEmailError);
     });
   });

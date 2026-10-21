@@ -1,6 +1,6 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { normalizeTransactionHash } from '@stellar-alerts/shared';
+import { normalizeTransactionHash, type PaymentDTO } from '@stellar-alerts/shared';
 import { generateTaxExportCsv } from '../../utils/tax-exporter';
 import { generateLedgerStatementPdf } from '../../utils/pdf-generator';
 import { generateTransactionReceiptPdf } from '../../utils/receipt-generator';
@@ -72,7 +72,11 @@ export class PaymentsController {
           cursor: parsed.data.cursor,
         },
       );
-      return reply.send({ success: true, payments: result.items, pagination: result.pagination });
+      const payments: PaymentDTO[] = result.items.map((payment) => ({
+        ...payment,
+        amount: payment.amount.toString(),
+      }));
+      return reply.send({ success: true, payments, pagination: result.pagination });
     } catch (err) {
       if (err instanceof CursorError) {
         return reply.status(400).send({ error: 'Invalid cursor', message: err.message });

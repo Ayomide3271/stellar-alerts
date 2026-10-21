@@ -6,6 +6,7 @@ import {
   getSacMetadata,
   simulateContractCall,
   formatSacAmountWithDiscovery,
+  withSacDecimals,
   sorobanServer,
 } from '../../lib/soroban';
 import * as cache from '../../lib/cache';
@@ -214,6 +215,45 @@ describe('Soroban RPC Event & SAC Metadata Discovery Utilities', () => {
       const result = await formatSacAmountWithDiscovery('1500000000000000000', wethContract);
       expect(result.formattedAmount).toBe('1.5');
       expect(result.metadata.symbol).toBe('WETH');
+    });
+  });
+  describe('failed discovery & decimal enrichment', () => {
+    it('caches a failed discovery only briefly so wrong decimals are not pinned for 24h', async () => {
+      const contractId = StellarSdk.StrKey.encodeContract(Buffer.alloc(32, 8));
+      vi.spyOn(sorobanServer, 'simulateTransaction').mockResolvedValue(null as any);
+      const setJsonSpy = vi.spyOn(cache, 'setJson');
+
+      const metadata = await getSacMetadata(contractId);
+      expect(metadata.decimals).toBe(7);
+      expect(setJsonSpy).toHaveBeenCalledWith(`sac:metadata:${contractId}`, metadata, 60);
+    });
+
+    it('shares one RPC discovery between concurrent lookups', async () => {
+      const contractId = StellarSdk.StrKey.encodeContract(Buffer.alloc(32, 9));
+      const simulateSpy = vi.spyOn(sorobanServer, 'simulateTransaction').mockResolvedValue({
+        result: { retval: StellarSdk.nativeToScVal(6, { type: 'u32' }) },
+      } as any);
+
+      const [a, b] = await Promise.all([getSacMetadata(contractId), getSacMetadata(contractId)]);
+      expect(a).toEqual(b);
+      // decimals + symbol + name, once
+      expect(simulateSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('withSacDecimals re-formats the raw amount using the token decimals', async () => {
+      const contractId = StellarSdk.StrKey.encodeContract(Buffer.alloc(32, 10));
+      await cache.setJson(`sac:metadata:${contractId}`, {
+        contractId,
+        decimals: 6,
+        symbol: 'USDC',
+        name: 'USD Coin',
+      });
+
+      const out = await withSacDecimals({ contractId, amount: '10', rawAmount: 10_000_000n });
+      expect(out.amount).toBe('10');
+
+      const out2 = await withSacDecimals({ contractId, amount: '0.15', rawAmount: 1_500_000n });
+      expect(out2.amount).toBe('1.5');
     });
   });
 });

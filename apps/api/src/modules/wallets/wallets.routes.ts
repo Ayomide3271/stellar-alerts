@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { authenticateHook } from '../../middleware/auth.middleware';
 import { registerIdempotency } from '../../middleware/idempotency.middleware';
 import { walletsController } from './wallets.controller';
+import { exportController } from './export.controller';
 
 export async function walletsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticateHook);

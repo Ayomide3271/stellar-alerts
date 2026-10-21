@@ -243,10 +243,16 @@ export function registerProfileCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description('List all configuration profiles')
-    .action(async () => {
+    .option('--json', 'Output results in JSON format')
+    .action(async (options: { json?: boolean }) => {
       try {
         const store = createProfileStore();
         const profiles = listProfiles(store);
+
+        if (options.json) {
+          console.log(JSON.stringify(profiles, null, 2));
+          return;
+        }
 
         if (profiles.length === 0) {
           console.log(

@@ -12,6 +12,9 @@ const API_URL =
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+/** Window event dispatched (e.g. by OfflineBanner) to force an SSE reconnect. */
+export const SSE_RECONNECT_EVENT = 'sse:reconnect';
+
 export interface PaymentEvent {
   paymentId: string;
   txHash: string;
@@ -87,6 +90,17 @@ export function usePaymentStream(onPayment: (data: PaymentEvent) => void) {
   useEffect(() => {
     connectRef.current = connect;
   }, [connect]);
+
+  // Reconnect immediately when the offline banner requests it
+  useEffect(() => {
+    const handler = () => {
+      if (unmountedRef.current || esRef.current) return;
+      reconnectDelayRef.current = RECONNECT_BASE_MS;
+      connectRef.current();
+    };
+    window.addEventListener(SSE_RECONNECT_EVENT, handler);
+    return () => window.removeEventListener(SSE_RECONNECT_EVENT, handler);
+  }, []);
 
   useEffect(() => {
     unmountedRef.current = false;
