@@ -139,11 +139,11 @@ export async function evaluateAndDispatch(
   const matchedRuleIds = matched.map((rule) => rule.id);
 
   if (await deps.hasDispatched(event.paymentId)) {
-    return { matchedRuleIds, enqueued: false };
+    return { matchedRuleIds: matchedRuleIds, enqueued: false };
   }
 
   await deps.recordDispatch(event.paymentId, matchedRuleIds);
   await deps.enqueueAlert(event);
 
-  return { matchedRuleIds, enqueued: true };
+  return { matchedRuleIds: matchedRuleIds, enqueued: true };
 }
