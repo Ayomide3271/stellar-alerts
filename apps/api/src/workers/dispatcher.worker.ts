@@ -3,6 +3,12 @@ import { redis, registerRedisCleanupTask } from '../lib/redis';
 import { createLogger } from '../lib/logger';
 import { RedisCircuitBreaker, CircuitBreakerOpenError } from '../modules/alerts/circuit-breaker';
 import { webhookTelemetry } from '../modules/webhooks/webhook-telemetry';
+import {
+  ssrfFilter,
+  SsrfFilter,
+  SsrfBlockedError,
+  type PinnedWebhookTarget,
+} from '../modules/webhooks/ssrf-filter';
 
 const log = createLogger({ module: 'WebhookDispatcherWorker' });
 
@@ -44,7 +50,7 @@ export class DispatcherWorker {
   ) {
     this.circuitBreaker = circuitBreaker || new RedisCircuitBreaker();
     this.transport = transport || this.defaultTransport.bind(this);
-    this.ssrfFilter = filter || defaultSsrfFilter;
+    this.ssrfFilter = filter || ssrfFilter;
   }
 
   private async defaultTransport(
@@ -76,7 +82,7 @@ export class DispatcherWorker {
    * 3. Dispatches webhook with pinned IP target.
    */
   public async processJob(job: { data: WebhookDispatchJobData }): Promise<WebhookDispatchResult> {
-    const { webhookId, url, payload, headers = {} } = job.data;
+    const { webhookId, url, payload, headers = {}, paymentId } = job.data;
 
     // Check circuit breaker state first
     const canSend = await this.circuitBreaker.canExecute(webhookId);

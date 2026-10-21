@@ -1,4 +1,5 @@
-import { bulkImportService, parseCsvWallets, BulkImportItem } from './bulk-import.service';\nimport { FastifyRequest, FastifyReply } from 'fastify';
+import { bulkImportService, parseCsvWallets, BulkImportItem } from './bulk-import.service';
+import { FastifyRequest, FastifyReply } from 'fastify';
 import type { WalletDTO } from '@stellar-alerts/shared';
 import {
   createWalletSchema,
@@ -171,6 +172,6 @@ export class WalletsController {
     const result = await bulkImportService.importWallets(userId, items);
     return reply.status(200).send({ success: true, ...result });
   }
-\n}
+}
 
 export const walletsController = new WalletsController();
