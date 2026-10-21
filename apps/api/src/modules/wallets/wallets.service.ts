@@ -95,7 +95,7 @@ export class WalletsService {
    * Optionally filters by a tag (case-insensitive).
    */
   async getWallets(userId: string, limit: number = 20, cursor?: string, tag?: string) {
-    const where: Record<string, any> = { userId };
+    const where: Record<string, any> = { userId, deletedAt: null };
 
     if (tag) {
       // Prisma's array filter is case-sensitive on PostgresQL.
@@ -152,7 +152,11 @@ export class WalletsService {
     if (!wallet || wallet.userId !== userId) {
       throw new Error('Wallet not found');
     }
-    await prisma.wallet.delete({ where: { id: walletId } });
+    // Soft-delete lifecycle: set deletedAt timestamp to avoid foreign-key cascading locks (#776)
+    await prisma.wallet.update({
+      where: { id: walletId },
+      data: { deletedAt: new Date() },
+    });
   }
 }
 
