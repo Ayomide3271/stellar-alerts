@@ -1,19 +1,20 @@
-'use client';
+"use client";
 
 /**
  * React hook for subscribing to the SSE payment push stream (Issue #64).
  * Uses the native EventSource API with automatic exponential-backoff reconnect.
  */
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback, useRef, useState } from "react";
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') ?? 'http://localhost:3001';
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  "http://localhost:3001";
 
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
 /** Window event dispatched (e.g. by OfflineBanner) to force an SSE reconnect. */
-export const SSE_RECONNECT_EVENT = 'sse:reconnect';
+export const SSE_RECONNECT_EVENT = "sse:reconnect";
 
 export interface PaymentEvent {
   paymentId: string;
@@ -24,6 +25,44 @@ export interface PaymentEvent {
   assetIssuer: string | null;
   fromAddress: string;
   receivedAt: string;
+}
+
+export interface SorobanDecodedTopic {
+  symbol: string;
+  type: string;
+  value: unknown;
+  xdrBase64?: string;
+}
+
+export interface SorobanEvent {
+  id: string;
+  contractId: string;
+  ledgerSeq: number;
+  createdAt: string;
+  eventType: "contract" | "system" | "diagnostic";
+  topics: SorobanDecodedTopic[];
+  dataXdr: string;
+  decodedData: Record<string, unknown>;
+  txHash: string;
+}
+
+export interface SorobanDecodedTopic {
+  symbol: string;
+  type: string;
+  value: unknown;
+  xdrBase64?: string;
+}
+
+export interface SorobanEvent {
+  id: string;
+  contractId: string;
+  ledgerSeq: number;
+  createdAt: string;
+  eventType: "contract" | "system" | "diagnostic";
+  topics: SorobanDecodedTopic[];
+  dataXdr: string;
+  decodedData: Record<string, unknown>;
+  txHash: string;
 }
 
 /**
@@ -56,18 +95,18 @@ export function usePaymentStream(onPayment: (data: PaymentEvent) => void) {
     const es = new EventSource(`${API_URL}/events`);
     esRef.current = es;
 
-    es.addEventListener('connected', () => {
+    es.addEventListener("connected", () => {
       setConnected(true);
       // Reset backoff on successful connection
       reconnectDelayRef.current = RECONNECT_BASE_MS;
     });
 
-    es.addEventListener('payment', (event: MessageEvent) => {
+    es.addEventListener("payment", (event: MessageEvent) => {
       try {
         const data: PaymentEvent = JSON.parse(event.data);
         onPaymentRef.current(data);
       } catch (err) {
-        console.warn('[SSE] Failed to parse payment event:', err);
+        console.warn("[SSE] Failed to parse payment event:", err);
       }
     });
 
@@ -86,6 +125,104 @@ export function usePaymentStream(onPayment: (data: PaymentEvent) => void) {
       }, delay);
     };
   }, []);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
+  // Reconnect immediately when the offline banner requests it
+  useEffect(() => {
+    const handler = () => {
+      if (unmountedRef.current || esRef.current) return;
+      reconnectDelayRef.current = RECONNECT_BASE_MS;
+      connectRef.current();
+    };
+    window.addEventListener(SSE_RECONNECT_EVENT, handler);
+    return () => window.removeEventListener(SSE_RECONNECT_EVENT, handler);
+  }, []);
+
+  useEffect(() => {
+    unmountedRef.current = false;
+    connect();
+
+    return () => {
+      unmountedRef.current = true;
+      esRef.current?.close();
+      esRef.current = null;
+      setConnected(false);
+    };
+  }, [connect]);
+
+  return { connected };
+}
+
+/**
+ * Subscribes to real-time Soroban contract events from the SSE endpoint.
+ *
+ * @param onSorobanEvent  Callback invoked with each incoming Soroban event payload.
+ * @param contractFilter  Optional contract ID filter to subscribe only to specific contracts.
+ *
+ * Usage:
+ *   const { connected } = useSorobanEventStream((event) => {
+ *     console.log('New Soroban event:', event);
+ *   }, 'CCONTRACT...');
+ */
+export function useSorobanEventStream(
+  onSorobanEvent: (data: SorobanEvent) => void,
+  contractFilter?: string,
+) {
+  const [connected, setConnected] = useState(false);
+  const onSorobanEventRef = useRef(onSorobanEvent);
+  const reconnectDelayRef = useRef(RECONNECT_BASE_MS);
+  const esRef = useRef<EventSource | null>(null);
+  const unmountedRef = useRef(false);
+
+  // Keep the callback ref current
+  useEffect(() => {
+    onSorobanEventRef.current = onSorobanEvent;
+  }, [onSorobanEvent]);
+
+  const connectRef = useRef<() => void>(() => {});
+
+  const connect = useCallback(() => {
+    if (unmountedRef.current) return;
+
+    const url = contractFilter
+      ? `${API_URL}/events?contract=${encodeURIComponent(contractFilter)}`
+      : `${API_URL}/events`;
+
+    const es = new EventSource(url);
+    esRef.current = es;
+
+    es.addEventListener("connected", () => {
+      setConnected(true);
+      reconnectDelayRef.current = RECONNECT_BASE_MS;
+    });
+
+    es.addEventListener("soroban", (event: MessageEvent) => {
+      try {
+        const data: SorobanEvent = JSON.parse(event.data);
+        onSorobanEventRef.current(data);
+      } catch (err) {
+        console.warn("[SSE] Failed to parse Soroban event:", err);
+      }
+    });
+
+    es.onerror = () => {
+      es.close();
+      esRef.current = null;
+      setConnected(false);
+
+      if (unmountedRef.current) return;
+
+      const delay = reconnectDelayRef.current;
+      reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_MAX_MS);
+
+      setTimeout(() => {
+        connectRef.current();
+      }, delay);
+    };
+  }, [contractFilter]);
 
   useEffect(() => {
     connectRef.current = connect;
