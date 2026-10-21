@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { authenticateHook } from '../../middleware/auth.middleware';
 import { idempotencyHooks } from '../../middleware/idempotency.middleware';
 import { webhooksController } from './webhooks.controller';
+import { webhookSandboxReplayController } from './sandbox.controller';
 
 export async function webhooksRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticateHook);
@@ -24,5 +25,7 @@ export async function webhooksRoutes(app: FastifyInstance) {
   // diagnostic probe whose whole purpose is to send, so replaying a stored
   // response would make the second press look like it worked when nothing ran.
   app.post('/webhooks/:id/test', webhooksController.testWebhook.bind(webhooksController));
+  // Same reasoning as /test: an outbound probe must actually run every time.
+  app.post('/webhooks/sandbox/replay', webhookSandboxReplayController.replay.bind(webhookSandboxReplayController));
   app.get('/webhooks/:id/logs', webhooksController.getWebhookLogs.bind(webhooksController));
 }

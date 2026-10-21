@@ -944,4 +944,24 @@ export async function enqueuePaymentAlert(data: AlertJobData) {
   }
 }
 
+/**
+ * Strict variant used by the outbox relay. Unlike enqueuePaymentAlert it never
+ * swallows a queue failure, so the outbox row stays pending and is retried
+ * instead of being marked processed without a confirmed BullMQ job. When no
+ * queue is configured at all, it dispatches directly like enqueuePaymentAlert.
+ */
+export async function enqueuePaymentAlertStrict(data: AlertJobData) {
+  if (!alertQueue) {
+    return processAlertDispatch(data);
+  }
+
+  const job = await alertQueue.add("dispatch-alert", data, {
+    jobId: `payment-${data.txHash}`,
+  });
+  if (!job?.id) {
+    throw new Error(`BullMQ did not confirm alert job for ${data.txHash}`);
+  }
+  return job;
+}
+
 export { dispatchPushNotification } from "../utils/push-protocol";

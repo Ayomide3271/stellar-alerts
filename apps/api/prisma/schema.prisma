@@ -89,6 +89,7 @@ model OutboxEvent {
   id          String    @id @default(cuid())
   eventType   String
   aggregateId String
+  idempotencyKey String? @unique
   payload     Json
   status      String    @default("pending")
   attempts    Int       @default(0)
