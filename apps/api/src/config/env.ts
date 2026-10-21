@@ -102,6 +102,10 @@ const envSchema = z.object({
   // one-time nonce consumption.
   WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS: z.coerce.number().int().positive().optional().default(30000),
   WEBHOOK_REPLAY_NONCE_TTL_SECONDS: z.coerce.number().int().positive().optional().default(300),
+  // Notification batching (#719): coalesce per-target webhook notifications
+  // into one JSON-array POST. The window is clamped to 1-10s at runtime.
+  WEBHOOK_BATCH_WINDOW_MS: z.coerce.number().int().positive().optional().default(5000),
+  WEBHOOK_BATCH_MAX_SIZE: z.coerce.number().int().positive().optional().default(100),
   // Worker concurrency and fairness rate budgets (#309)
   ALERT_WORKER_CONCURRENCY: z.coerce
     .number()
@@ -313,6 +317,8 @@ const defaultEnvFallback: Env = {
   SOROBAN_SAC_WORKER_ENABLED: "true",
   WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS: 30000,
   WEBHOOK_REPLAY_NONCE_TTL_SECONDS: 300,
+  WEBHOOK_BATCH_WINDOW_MS: 5000,
+  WEBHOOK_BATCH_MAX_SIZE: 100,
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318/v1/traces",
   OTEL_SERVICE_NAME: "stellar-alerts-api",
 };
@@ -384,6 +390,8 @@ const parseEnv = (): Env => {
     SOROBAN_SAC_WORKER_ENABLED: process.env.SOROBAN_SAC_WORKER_ENABLED || "true",
     WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS: process.env.WEBHOOK_REPLAY_DRIFT_TOLERANCE_MS || "30000",
     WEBHOOK_REPLAY_NONCE_TTL_SECONDS: process.env.WEBHOOK_REPLAY_NONCE_TTL_SECONDS || "300",
+    WEBHOOK_BATCH_WINDOW_MS: process.env.WEBHOOK_BATCH_WINDOW_MS || "5000",
+    WEBHOOK_BATCH_MAX_SIZE: process.env.WEBHOOK_BATCH_MAX_SIZE || "100",
     SOROBAN_RESTORATION_WORKER_ENABLED: process.env.SOROBAN_RESTORATION_WORKER_ENABLED || "true",
     SOROBAN_RESTORATION_WORKER_INTERVAL_MS: process.env.SOROBAN_RESTORATION_WORKER_INTERVAL_MS || "60000",
     SOROBAN_RESTORATION_WARNING_LEDGERS: process.env.SOROBAN_RESTORATION_WARNING_LEDGERS || "17280",
