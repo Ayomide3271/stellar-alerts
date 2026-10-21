@@ -13,6 +13,7 @@ vi.mock('../../../config/env', () => ({
     JWT_SECRET: 'test-secret-key-for-health-tests',
     REDIS_URL: 'redis://localhost:6379',
     PORT: '3001',
+    DEEP_HEALTH_TIMEOUT_MS: 50,
   },
 }));
 
@@ -21,13 +22,21 @@ vi.mock('../../../lib/prisma', () => ({
     $queryRaw: vi.fn(),
     $disconnect: vi.fn(),
   },
+  prismaRead: {},
+  setReadTarget: vi.fn(),
+}));
+
+// BullMQ exposes `Queue.client` as a Promise, so the mock must match that
+// shape to catch regressions where the client promise is not awaited.
+const { redisClientMock } = vi.hoisted(() => ({
+  redisClientMock: {
+    ping: vi.fn().mockResolvedValue('PONG'),
+  },
 }));
 
 vi.mock('../../../lib/queue', () => ({
   alertQueue: {
-    client: {
-      ping: vi.fn().mockResolvedValue('PONG'),
-    },
+    client: Promise.resolve(redisClientMock),
   },
   dlqQueue: null,
   alertQueueEvents: null,
@@ -45,9 +54,26 @@ vi.mock('../../../modules/auth/auth.routes', () => ({ authRoutes: async () => {}
 vi.mock('../../../modules/wallets/wallets.routes', () => ({ walletsRoutes: async () => {} }));
 vi.mock('../../../modules/payments/payments.routes', () => ({ paymentsRoutes: async () => {} }));
 vi.mock('../../../modules/webhooks/webhooks.routes', () => ({ webhooksRoutes: async () => {} }));
+vi.mock('../../../modules/account/account.routes', () => ({ accountRoutes: async () => {} }));
+vi.mock('../../../modules/soroban-state/soroban-state.routes', () => ({ sorobanStateRoutes: async () => {} }));
+vi.mock('../../../modules/notifications/notifications.routes', () => ({ notificationsRoutes: async () => {} }));
+vi.mock('../../../modules/alert-rules/alert-rules.routes', () => ({ alertRulesRoutes: async () => {} }));
+vi.mock('../../../modules/dead-letters/dead-letters.routes', () => ({ deadLettersRoutes: async () => {} }));
+vi.mock('../../../modules/discord-interactions', () => ({ discordInteractionsRoutes: async () => {} }));
+vi.mock('../../../modules/slack/slack.routes', () => ({ slackRoutes: async () => {} }));
+vi.mock('../../../modules/graphql/graphql.routes', () => ({ graphqlRoutes: async () => {} }));
+vi.mock('../../../modules/exports/exports.routes', () => ({ exportsRoutes: async () => {} }));
+vi.mock('../../../modules/simulation/simulation.routes', () => ({ simulationRoutes: async () => {} }));
+vi.mock('../../../modules/admin/admin.routes', () => ({ adminRoutes: async () => {} }));
+vi.mock('../../../modules/audit/audit.routes', () => ({ auditRoutes: async () => {} }));
 
 // Stub the prisma Fastify plugin
 vi.mock('../../../plugins/prisma', () => ({
+  default: async () => {},
+}));
+
+// Avoid starting the DB failover background poller in unit tests.
+vi.mock('../../../plugins/degraded-mode', () => ({
   default: async () => {},
 }));
 
@@ -55,7 +81,6 @@ vi.mock('../../../plugins/prisma', () => ({
 // Import mocked modules so we can control their behaviour per test
 // ---------------------------------------------------------------------------
 import { prisma } from '../../../lib/prisma';
-import { alertQueue } from '../../../lib/queue';
 import { sorobanServer } from '../../../lib/soroban';
 
 // ---------------------------------------------------------------------------
@@ -81,7 +106,7 @@ describe('GET /health/deep', () => {
   // -------------------------------------------------------------------------
   it('returns 200 with status ok when all services are healthy', async () => {
     (prisma.$queryRaw as any).mockResolvedValue([{ '?column?': 1 }]);
-    (alertQueue!.client.ping as any).mockResolvedValue('PONG');
+    (redisClientMock.ping as any).mockResolvedValue('PONG');
     (sorobanServer.getLatestLedger as any).mockResolvedValue({ sequence: 12345 });
 
     const app = await buildTestApp();
@@ -105,7 +130,7 @@ describe('GET /health/deep', () => {
   // -------------------------------------------------------------------------
   it('returns 503 with postgres error when database is unreachable', async () => {
     (prisma.$queryRaw as any).mockRejectedValue(new Error('ECONNREFUSED 5432'));
-    (alertQueue!.client.ping as any).mockResolvedValue('PONG');
+    (redisClientMock.ping as any).mockResolvedValue('PONG');
     (sorobanServer.getLatestLedger as any).mockResolvedValue({ sequence: 12345 });
 
     const app = await buildTestApp();
@@ -127,7 +152,7 @@ describe('GET /health/deep', () => {
   // -------------------------------------------------------------------------
   it('returns 503 with redis error when Redis is unreachable', async () => {
     (prisma.$queryRaw as any).mockResolvedValue([{ '?column?': 1 }]);
-    (alertQueue!.client.ping as any).mockRejectedValue(new Error('Redis connection refused'));
+    (redisClientMock.ping as any).mockRejectedValue(new Error('Redis connection refused'));
     (sorobanServer.getLatestLedger as any).mockResolvedValue({ sequence: 12345 });
 
     const app = await buildTestApp();
@@ -149,7 +174,7 @@ describe('GET /health/deep', () => {
   // -------------------------------------------------------------------------
   it('returns 503 with horizon error when Soroban RPC is unreachable', async () => {
     (prisma.$queryRaw as any).mockResolvedValue([{ '?column?': 1 }]);
-    (alertQueue!.client.ping as any).mockResolvedValue('PONG');
+    (redisClientMock.ping as any).mockResolvedValue('PONG');
     (sorobanServer.getLatestLedger as any).mockRejectedValue(new Error('Network timeout'));
 
     const app = await buildTestApp();
@@ -171,7 +196,7 @@ describe('GET /health/deep', () => {
   // -------------------------------------------------------------------------
   it('returns 503 with all checks errored when every service is down', async () => {
     (prisma.$queryRaw as any).mockRejectedValue(new Error('DB unavailable'));
-    (alertQueue!.client.ping as any).mockRejectedValue(new Error('Redis down'));
+    (redisClientMock.ping as any).mockRejectedValue(new Error('Redis down'));
     (sorobanServer.getLatestLedger as any).mockRejectedValue(new Error('Horizon RPC down'));
 
     const app = await buildTestApp();
@@ -195,7 +220,7 @@ describe('GET /health/deep', () => {
   // -------------------------------------------------------------------------
   it('does not require an Authorization header', async () => {
     (prisma.$queryRaw as any).mockResolvedValue([{ '?column?': 1 }]);
-    (alertQueue!.client.ping as any).mockResolvedValue('PONG');
+    (redisClientMock.ping as any).mockResolvedValue('PONG');
     (sorobanServer.getLatestLedger as any).mockResolvedValue({ sequence: 99 });
 
     const app = await buildTestApp();
@@ -211,6 +236,30 @@ describe('GET /health/deep', () => {
     expect(response.statusCode).not.toBe(403);
     // Status is 200 when healthy
     expect(response.statusCode).toBe(200);
+
+    await app.close();
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 7: A dependency that hangs is bounded by the probe deadline
+  // -------------------------------------------------------------------------
+  it('returns 503 instead of hanging when a dependency stops responding', async () => {
+    (prisma.$queryRaw as any).mockImplementation(() => new Promise(() => {}));
+    (redisClientMock.ping as any).mockResolvedValue('PONG');
+    (sorobanServer.getLatestLedger as any).mockResolvedValue({ sequence: 12345 });
+
+    const app = await buildTestApp();
+    const response = await app.inject({ method: 'GET', url: '/health/deep' });
+
+    expect(response.statusCode).toBe(503);
+
+    const body = response.json();
+    expect(body.status).toBe('degraded');
+    expect(body.checks).toEqual({
+      postgres: 'error',
+      redis: 'ok',
+      horizon: 'ok',
+    });
 
     await app.close();
   });
