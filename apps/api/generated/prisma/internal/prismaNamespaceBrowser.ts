@@ -168,6 +168,7 @@ export const OutboxEventScalarFieldEnum = {
   id: 'id',
   eventType: 'eventType',
   aggregateId: 'aggregateId',
+  idempotencyKey: 'idempotencyKey',
   payload: 'payload',
   status: 'status',
   attempts: 'attempts',

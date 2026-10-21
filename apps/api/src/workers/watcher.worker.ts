@@ -20,6 +20,7 @@ import { evaluateAlertRules, evaluateAndDispatch, AlertRuleRecord, NormalizedPay
 import { MemoryMonitor, MemorySnapshot } from '../utils/memory-monitor';
 import { appendPaymentChecksum } from '../services/checksumChain.service';
 import { createLogger } from '../lib/logger';
+import { outboxService } from '../modules/outbox/outbox.service';
 import { WorkerLifecycleManager } from '../lib/worker-lifecycle';
 import { startTelemetry, shutdownTelemetry } from '../lib/telemetry';
 import { startWorkerMetricsServer, stopWorkerMetricsServer } from '../lib/worker-metrics-server';
@@ -222,14 +223,12 @@ export async function processPaymentRecord(
               fromAddress,
               receivedAt: receivedAt.toISOString(),
             };
-            await tx.outboxEvent.createMany({
-              data: [
-                ...(shouldSendAlert
-                  ? [{ eventType: 'payment.alert', aggregateId: persistedPayment.id, payload: eventPayload }]
-                  : []),
-                { eventType: 'payment.realtime', aggregateId: persistedPayment.id, payload: eventPayload },
-              ],
-            });
+            await outboxService.record(tx, [
+              ...(shouldSendAlert
+                ? [{ eventType: 'payment.alert' as const, aggregateId: persistedPayment.id, payload: eventPayload }]
+                : []),
+              { eventType: 'payment.realtime' as const, aggregateId: persistedPayment.id, payload: eventPayload },
+            ]);
           }
 
           let cursorGap = { hasGap: false, ledgerDelta: 0 };
@@ -1247,6 +1246,8 @@ if (require.main === module) {
   registerSupervisorHeartbeat();
   startMemoryMonitor();
   runWatcher();
+  // Loaded lazily so importing the watcher (e.g. in tests) never opens relay connections.
+  void import('./outbox.worker').then(({ runOutboxRelay }) => runOutboxRelay());
 
   // Issue #20 / #536: Graceful shutdown for the watcher worker process
   let watcherIntervalId: NodeJS.Timeout | undefined;

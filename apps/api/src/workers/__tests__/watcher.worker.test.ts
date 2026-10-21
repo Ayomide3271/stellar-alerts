@@ -584,9 +584,10 @@ describe('processPaymentRecord — persisted AlertRule evaluator', () => {
     });
     expect(prisma.outboxEvent.createMany).toHaveBeenCalledWith({
       data: expect.arrayContaining([
-        expect.objectContaining({ eventType: 'payment.alert', aggregateId: 'payment-1' }),
-        expect.objectContaining({ eventType: 'payment.realtime', aggregateId: 'payment-1' }),
+        expect.objectContaining({ eventType: 'payment.alert', aggregateId: 'payment-1', idempotencyKey: 'payment.alert:payment-1' }),
+        expect.objectContaining({ eventType: 'payment.realtime', aggregateId: 'payment-1', idempotencyKey: 'payment.realtime:payment-1' }),
       ]),
+      skipDuplicates: true,
     });
     // The legacy filterRules gate must not run once AlertRule rows exist for the user.
     expect(prisma.notificationPreference.findUnique).not.toHaveBeenCalled();
@@ -604,6 +605,7 @@ describe('processPaymentRecord — persisted AlertRule evaluator', () => {
     expect(prisma.alertRuleDispatchLog.create).not.toHaveBeenCalled();
     expect(prisma.outboxEvent.createMany).toHaveBeenCalledWith({
       data: [expect.objectContaining({ eventType: 'payment.realtime', aggregateId: 'payment-1' })],
+      skipDuplicates: true,
     });
   });
 
